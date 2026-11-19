@@ -1,26 +1,63 @@
-# MRFP Extractor Canada HTML v7 — Production Ready
 
-**Edition:** `MRFP_Extractor_Canada_HTML_v7_Ready`  
-**Documentation updated:** November 19, 2026  
-**Application version:** Browser v7 (latest approved v7 code, including Mawer FMC #50)  
-**Registered Fund Management Companies (FMCs):** **50**  
-**Distribution type:** Complete browser application and rebuildable source tree
 
-This README is the **single current documentation** for the production package. It consolidates the relevant operating instructions, architecture and release evolution from **v6-5 through the latest v7 + Mawer FMC #50**. The application and its generated bundles are copied unchanged from the supplied updated v7 baseline; the production cleanup changes packaging and documentation only.
 
-## 1. Quick start
 
-1. Extract `MRFP_Extractor_Canada_HTML_v7_Ready.zip`. The archive contains a **single folder** named `MRFP_Extractor_Canada_HTML_v7_Ready`.
-2. Keep its `Assets/`, `css/`, `js/`, and `vendor/` folders together with `index.html`.
-3. Open **`index.html` in Google Chrome or Microsoft Edge** (double-click or Open File). A server, Node.js, and `npm` are **not** required to use the already-built browser application.
-4. Select one or more Canadian Management Reports of Fund Performance (MRFPs), extract, and **independently verify** fund identity, report period, Class/Series, MER, Total TER, PTR, and evidence highlighting against the original report.
-5. Back up important saved History before changing browser profiles or folder paths. The new `_Ready` folder location may be treated as a different local-file storage context, so previously saved records may not appear automatically.
 
-Native-text PDF extraction uses the locally bundled PDF.js worker and can work without an internet connection. Optional OCR and emergency dependency fallback may need network access (see §6). This software provides source-assisted extraction; ambiguous values should be manually reviewed rather than treated as audited facts.
 
-## 2. Included production architecture
+MRFP Extractor Canada HTML v7
+Edition: MRFP_Extractor_Canada_HTML_v7_Ready
+Documentation updated: November 19, 2026
+Current application: v7, including Mawer Investment Management Ltd. (FMC #50)
+Supported Fund Management Companies (FMCs): 50
 
-```text
+This is the current documentation for the application as supplied. It covers use, included files, data interpretation, source highlighting, saved records, limitations, and the release history from v6-5 through the current v7 edition.
+
+1. Open and use the application
+Extract MRFP_Extractor_Canada_HTML_v7_Ready.zip. Keep the folder MRFP_Extractor_Canada_HTML_v7_Ready and all its contents together.
+Open index.html directly in Google Chrome or Microsoft Edge.
+Select Canadian Management Reports of Fund Performance (MRFPs) in PDF format. The application supports its existing sequential batch workflow of up to 10 PDFs.
+Review the detected FMC, full fund name, report period, Class/Series, MER, Total TER, and PTR.
+Inspect the source PDF and evidence highlights, correct any values that require manual review, and export results as needed.
+No installation, server, Node.js, or internet connection is needed for the normal native-text PDF workflow. Optional OCR and certain dependency fallbacks may require internet access.
+
+Important: Keep a backup of important saved History before moving the application to a different folder or changing browser profiles. Local-file storage access can depend on the browser and file location.
+
+2. Main features
+Feature	Current behavior
+FMC detection	Manager-aware recognition across the 50 registered FMC adapters
+Fund identity	Complete fund names detected from document context, not from a list of individual fund names
+Class/Series	Published designations, including supported alphanumeric, named, combined, and ETF-unit forms
+Financial ratios	MER, Total Expense Ratio only (TER), and PTR from applicable financial tables
+Reporting period	Annual and semi-annual MRFPs, with source-backed selection of the current financial-table period
+Multiple PDFs	Existing 10-PDF sequential batch handling and document identity separation
+Source evidence	PDF preview, positioned metric highlights, and yellow/orange evidence interactions
+Review	Manual editing, verification, and re-scan review behavior
+Saved work	Recent Documents, History/Restore, and saved PDF/record handling in browser storage
+Filtering and exports	Data Filter, CSV/Excel workflows, Lipper mapping, and existing workbook/export formats
+PDF reading	Bundled PDF.js native-text reader; optional OCR support for applicable pages
+The application preserves blank/missing values rather than turning them into numeric zero. Verify any uncertain result against the actual PDF before relying on it.
+
+3. Extraction and evidence rules
+Fund and Class/Series
+The actual issuer/manager role determines the FMC. A passing mention of another company in a holding or narrative is not enough to assign ownership.
+Extract the complete published fund name and the Class/Series associated with an actual financial-ratio table.
+A single combined published table corresponds to one result. Independently reported Class/Series tables correspond to separate results.
+If no distinct Class/Series is published for the ratio table, use the full fund name as the Class/Series display fallback, without duplicating the fund name in exports.
+Match complete designations: Series A must not be confused with Series AA or Series A10; ETF Units is not automatically ETF Series Units.
+Financial metrics
+Output	Meaning	Source rule
+MER	Management Expense Ratio	Current applicable period and published Class/Series
+Total TER	Total Expense Ratio	Use only an explicitly supported total expense ratio disclosure; never substitute Trading Expense Ratio
+PTR	Portfolio Turnover Rate	Current applicable period and associated financial table
+Do not substitute Management expense ratio before waivers or absorptions for the primary MER. A missing or ambiguous disclosure remains blank (null), not 0.
+
+Reporting date and highlights
+Select the applicable current-period ratio column; do not default to an older comparison year or to the largest date appearing elsewhere in the PDF.
+Recognize valid printed date formats where supported and use surrounding report/table context to resolve reporting-period identity. Ambiguous dates require review.
+Metric evidence must correspond to the same PDF, page, table, Class/Series, reporting column, row, and printed value as the extraction result.
+The app uses PDF.js native text positioning for source-cell highlights when available. Unsupported or ambiguous geometry must not be represented as a verified metric location.
+Yellow and orange highlights serve different source-evidence/search interactions. Verify the selected page and printed figure when reviewing a result.
+4. Included application structure
 MRFP_Extractor_Canada_HTML_v7_Ready/
 ├── Assets/
 │   └── Icons/
@@ -32,18 +69,11 @@ MRFP_Extractor_Canada_HTML_v7_Ready/
 │   ├── build.cjs
 │   └── fmc-manifest.json
 ├── js/
-│   ├── core/                       7 shared source modules
-│   │   ├── shared-utils.js
-│   │   ├── series-designations.js
-│   │   ├── total-expense-ratio.js
-│   │   ├── fmc-registry.js
-│   │   ├── extraction-engine.js
-│   │   ├── evidence-utils.js
-│   │   └── evidence-engine.js
-│   ├── fmc/                        50 FMC adapters + ADAPTER_TEMPLATE.txt
+│   ├── core/                    7 shared JavaScript source modules
+│   ├── fmc/                     50 FMC adapters + ADAPTER_TEMPLATE.txt
 │   ├── app.js
-│   ├── engine.js                  generated browser bundle
-│   ├── evidence-locator.js        generated browser bundle
+│   ├── engine.js
+│   ├── evidence-locator.js
 │   ├── evidence-viewer.js
 │   ├── excel-export.js
 │   ├── filter-excel.js
@@ -56,35 +86,11 @@ MRFP_Extractor_Canada_HTML_v7_Ready/
 ├── index.html
 ├── README.md
 └── skeleton-creation.txt
-```
+File roles: index.html, css/, and Assets/ provide the interface. js/app.js coordinates application behavior; js/pdf-reader.js reads PDFs; js/engine.js handles extraction; js/evidence-locator.js locates source evidence; js/evidence-viewer.js displays it; js/storage.js manages saved data; and the remaining scripts support filtering and exports. The js/core/ modules contain shared behavior, while js/fmc/ contains manager-specific logic. dev-tools/fmc-manifest.json records the current FMC registrations.
 
-**Total:** 76 packaged files: **74 original source/runtime/build/assets files**, plus this README and the corrected skeleton script. There are **no** sample or fixture PDFs, `tests/`, `batch-test/`, `node_modules/`, `qa-v4/`, `results/`, archived `docs/`, `migration/`, golden JSON, or regression reports.
+skeleton-creation.txt contains Windows Command Prompt commands to create the folder/file skeleton under the user's Documents folder. Its commands create missing empty placeholders; they do not insert code, produce images, or create a working copy of the app on their own. The ZIP already includes the working files.
 
-**Why `dev-tools/` remains:** Only `build.cjs` and `fmc-manifest.json` are retained. They are **build dependencies**, not test tools. These preserve the ability to edit a manager adapter and regenerate the two classic-script bundles. Both bundles are also included prebuilt, so end users never need to rebuild to run the app.
-
-### Role of the source files
-
-| Path | Function |
-| --- | --- |
-| `index.html`, `css/style.css`, `Assets/Icons/` | Browser interface, styling and local image assets |
-| `js/app.js` | UI workflow, PDF batch queue, filters, review, History navigation and exports orchestration |
-| `js/pdf-reader.js` | PDF.js native text, positioned text items, optional OCR fallback/supplementation |
-| `js/storage.js` | Existing browser storage, saved source PDFs and extraction/history state |
-| `js/excel-export.js`, `js/filter-excel.js` | Existing Excel/CSV generation and Excel/CSV filtering |
-| `js/evidence-viewer.js` | PDF preview and yellow/orange source highlighting, manager independent |
-| `js/core/*.js` | Shared general parser, exact Class/Series grammar, Total TER policy, dispatch, ratio extraction and source evidence |
-| `js/fmc/<key>.js` | Manager-specific identity, fund and Class/Series ownership, period/layout strategy, extraction and source evidence |
-| `js/engine.js`, `js/evidence-locator.js` | **Generated classic scripts** loaded directly by the browser; do not hand-edit |
-| `dev-tools/fmc-manifest.json` | Actual FMC registration: `key`, `profile`, `extract`, `file` |
-| `dev-tools/build.cjs` | Deterministic Node.js developer build of **both** generated bundles |
-| `vendor/pdfjs/*.js` | Local PDF.js and worker for file-based browser use |
-| `skeleton-creation.txt` | Windows CMD commands to make the exact empty architecture for manual source population |
-
-### Registered FMC adapters (50)
-
-The **authoritative identities and names are the manifest**, not an independently maintained runtime allowlist. The currently shipped source filenames are:
-
-```text
+Registered FMC adapter files (50)
 accelerate.js       agf.js            arrow_capital.js    barrantagh.js
 beutel_goodman.js   blackrock.js      bmg.js              bmo.js
 brandes.js          brompton.js       canada_life.js       capital_group.js
@@ -98,97 +104,45 @@ nei.js              newgen.js         ninepoint.js         pender.js
 purpose.js          rbc.js            rgp.js               rpia.js
 scotia.js           sei.js            sun_life.js          td.js
 three_iq.js         vanguard.js
-```
+The ADAPTER_TEMPLATE.txt file is not a registered FMC. The application has 50 active FMC adapters, not 51.
 
-`ADAPTER_TEMPLATE.txt` in the same folder is a source template, not an active 51st adapter.
+5. Saved data, review, and exports
+History / Restore: Stored data and source PDF copies use the existing browser storage behavior. Do not clear browser data or discard the source folder until important records have been reviewed and backed up.
+Recent Documents: Removing a saved PDF copy and deleting saved records are different operations. Review each confirmation carefully.
+Re-scan / Verify: A re-scan is a comparison/review step. Check manually corrected or verified values before accepting changes.
+Filtering: Use the existing Data Filter and source-matching options. Class/Series matches are intended to distinguish complete labels rather than partial prefixes.
+Exports: Existing CSV and Excel functionality includes the Extraction Results and Lipper Format conventions, with Lipper ID mapping where provided.
+6. Offline and OCR behavior
+The PDF.js library and worker are included in vendor/pdfjs/, supporting normal native-text reading without a server.
+Some scanned or low-text PDF pages may depend on optional OCR. Its scripts, worker, or language data may require an online resource unless already available locally or cached.
+When OCR supplements a readable native-text page, valid PDF.js text coordinates remain available for metric evidence. When OCR replaces missing native text, the application must not invent native-coordinate highlights for OCR-only text.
+Very unusual layouts, scanned documents, ambiguous ratio tables, or unsupported date/Series presentations may require manual review. Source highlighting and saved-record behavior should be checked in the browser used for day-to-day operation.
+7. Version history — v6-5 to current v7
+The current edition keeps the application label v7. The intermediate labels below describe earlier revisions whose applicable functionality is incorporated into the present application.
 
-## 3. Core extraction and evidence contract
+Version / stage	Changes retained in the current application
+v6-5 — November 3, 2026	Established FMC-isolated extraction and evidence logic, with shared core functions retained for general processing. Existing interface, saved-data behavior, and financial outputs were preserved.
+Evidence-viewer refinements	Kept source highlighting and evidence-refresh behavior manager-independent, including existing record-stamp and History compatibility safeguards.
+v7 — November 18, 2026	Introduced seven shared core modules, consistent Class/Series recognition for extraction and evidence, improved exact-label handling, and manager-isolation safeguards. Preserved strict Total TER meaning.
+v7-5 — November 19, 2026	Extended recognition for complete named/units Series in BMO, Dynamic, Fidelity, and Invesco; refined handling of supported Series table layouts.
+v7-6 — November 19, 2026	Refined layout-specific behavior for RGP, Manulife, Harvest, and general evidence grammar.
+v7-7 — November 19, 2026	Improved Hamilton Class-table extraction and evidence behavior, including separately published Class financial tables.
+Consolidated v7 — November 19, 2026	Added support for distinct, source-published Class/Series ratio tables in BlackRock, Vanguard, Global X, Accelerate, and Brompton.
+Mawer FMC #50 — November 19, 2026	Added Mawer support for annual and interim MRFP layouts; handled the 2026 Series F (formerly Series A) designation as one current Series, plus exact Data Filter matching and corrected native-text/OCR evidence-status behavior. The source examples covered Global Balanced, Global Small Cap, and Canadian Bond funds.
+v7 Ready — November 19, 2026	Consolidated the application into the current ready-to-use folder and this single README while retaining existing operating features and source files.
+Mawer designation note
+Mawer's 2025 reports used Series A; its 2026 interim reports use Series F (formerly Series A) following the May 27, 2026 renaming. The 2026 ratio table represents one Series F record, not separate Series F and legacy Series A results. As with every issuer, Trading Expense Ratio is not Total TER.
 
-- **Source truth:** Read the original MRFP. Identify the legal manager/issuer, complete **fund name**, actual report-ended date, and the latest appropriate financial-table column. Do not infer a date from an unrelated footnote, holdings date, or a larger year elsewhere in the report.
-- **Published Class/Series comes first.** Support structurally valid names, including single-letter, two-letter, letter-number, named or combined Series and explicit ETF-unit designations, **only when tied to a published financial ratio table**. A combined published ratio table is one row; separate published tables are separate rows. A heading alone is insufficient.
-- **No distinct published Class/Series:** Use the **complete dynamically identified Fund Name as Class/Series** as the display/identity fallback, not fabricated `Units`. In the existing combined export naming, do not print the fund title twice.
-- **Ratios:** `MER` is **Management Expense Ratio**, taken from the correct current-period row; **TER means Total Expense Ratio only**. **Trading Expense Ratio is never substituted for Total TER.** `PTR` is Portfolio Turnover Rate. Do not confuse *MER before waivers/absorptions* with MER.
-- **Unreported/ambiguous data:** Preserve `null`/blank versus genuine numeric zero. Do not synthesize figures or borrow another Series' values. MER, Total TER, and PTR must be sourced separately.
-- **Source evidence:** Associate a result with the correct document, fund, Class/Series, financial-table heading, period, metric, current column, printed number and PDF.js page/position. If evidence is ambiguous or native geometry unavailable, report unavailable evidence rather than make up a highlight.
-- **No individual-fund hardcoding:** FMC/manager identity cues and reusable table grammar may be adapter-specific. Individual example fund names, filenames, numeric ratios, ticker allowlists or fixed source pages must not be hardcoded into production recognition or evidence rules.
-- **Mixed date formats:** Where actually printed, compare validated calendar dates from formats such as ISO, month-first and written dates. Do not guess ambiguous day/month order; corroborate report headings against the financial table's physical header.
-- **Dynamic exact labels:** `Series A` must not partially match `Series A10` or `Series AA`, and `ETF Units` is not automatically the same as `ETF Series Units`.
+8. Everyday-use checklist
+Open the included index.html in Chrome or Edge, retaining all folders in their original relative locations.
+Load the intended PDF or batch and review detected FMC, full fund name, reporting date, and published Class/Series.
+Check MER, Total TER only, PTR, and any missing/blank outputs against the original ratio tables.
+Review evidence highlights and page positions before marking results verified.
+Confirm filtered rows and exports, and maintain backups of important browser-stored History.
+Use OCR where needed and available; do not treat uncertain OCR or missing highlights as independently verified figures.
+Source priority: The original MRFP controls financial disclosures. The application's output is an extraction and review aid, not a substitute for examining the published document.
 
-These are **implementation/verification rules**, not claims that every possible future issuer PDF template or OCR-rendered page has already been certified.
 
-## 4. User workflows and saved data
 
-### Extract and review
 
-- Select a PDF or prepare the existing **up-to-10-PDF sequential batch**. Review each document's detected manager, fund, MRFP period, Class/Series, MER/Total TER/PTR and any missing fields.
-- Inspect the original PDF and positioned source evidence (yellow extraction highlighting and orange Search focus), including navigation and page/zoom controls when available.
-- Use the existing manual correction and **Verify** actions for reviewed rows. Re-scan offers a comparison/review flow; do not assume it silently preserves or replaces verified manual edits.
-- The existing paste-text fallback is less reliable than directly selecting a native-text PDF, especially for geometry-sensitive evidence.
 
-### History, storage and exports
-
-- Extraction results, document identity and original PDF copies can be retained in the existing browser storage/History implementation. Recent Documents, History/Restore, editing and verification remain in place.
-- Do not clear browser site data or delete the original application folder before taking necessary backups. A different browser profile or `file://` folder location can make prior IndexedDB data inaccessible from the new location; this is not a server-side account.
-- Retain the existing Data Filter, Excel/CSV import/filter path, Lipper ID mapping, filtered CSV, standard CSV/Excel exports and the `Extraction Results` / `Lipper Format` workbook conventions.
-- The app includes storage-management actions; **remove saved PDF copies** is not the same as **delete all saved PDFs and extraction/history records**. Review the confirmation before choosing destructive options.
-
-## 5. Developer maintenance and rebuild
-
-The installed Ready ZIP **works as-is**. The commands in this section apply only when a developer changes adapter or core source.
-
-1. Edit the matching `js/fmc/<key>.js` sections: `// @mrfp:profile`, `// @mrfp:extraction`, `// @mrfp:evidence`. Keep manager-specific detection, report dates, class ownership, financial layout and evidence in that adapter whenever possible.
-2. To add a genuinely new FMC, copy `js/fmc/ADAPTER_TEMPLATE.txt` to `js/fmc/<new_key>.js`, implement the functions and add exactly one entry to `dev-tools/fmc-manifest.json`. Do **not** assume profile identifiers are uniformly named `profile_<key>`; follow the actual manifest and neighboring adapters.
-3. From the project root, with Node.js installed on the **developer** PC, run:
-
-   ```cmd
-   node dev-tools\build.cjs
-   ```
-
-4. The builder validates the JavaScript and rewrites **both** `js/engine.js` and `js/evidence-locator.js`. These must always come from the **same source tree**. Do not manually patch either generated bundle or mix output files from separate builds.
-5. For a real new manager/layout, validate multiple original source documents and exact financial/source-cell expectations **outside this production-only ZIP**. Keep a separate, complete Developer project containing PDFs, tests and approved regression golden; re-test all existing managers before distributing another Ready ZIP. No testing infrastructure is bundled here.
-6. Changes to shared files such as `js/app.js`, `js/pdf-reader.js`, the seven core modules or `js/evidence-viewer.js` require a demonstrated cross-manager need and relevant independent safety testing. Ordinary new-manager layouts should remain adapter-isolated.
-
-**Source code and binary assets:** `skeleton-creation.txt` creates missing *empty* files/folders only. It cannot create a working application by itself. Paste valid source into text files, copy real JPG/PNG and PDF.js vendor binaries from a trusted build, then run the bundler. Never replace actual binary assets with empty placeholders in a deployed package.
-
-## 6. Offline, OCR and current limits
-
-- Native text PDF reading uses local `vendor/pdfjs/pdf.min.js` and `pdf.worker.min.js`; `file://` use in Chrome/Edge remains the intended deployment model.
-- Optional Tesseract OCR for low-text pages or chart supplements may load JavaScript, worker or language data from online CDNs unless already cached. No claim of full offline OCR support is made. A local PDF.js load failure may trigger the existing online fallback.
-- **Reader status safeguard added with FMC #50:** OCR **supplementation** retains valid native text items and `ocrUsed:false`, with `ocrSupplemented:true`; genuine native-text **replacement** sets `ocrUsed:true`. Native metric source boxes must not disappear merely because chart OCR appended text, and OCR-only text must not receive invented PDF-native metric boxes.
-- The source identity, date and cell geometry rules are intentionally conservative. New or scanned layouts may require manual review or a verified adapter change.
-- Production packaging **does not certify** end-user Chrome/Edge visual yellow/orange overlays, live IndexedDB History/Restore, interactive exports, or OCR accuracy in every target installation. Validate those behaviors on the actual production browser.
-- The historical developer-only approval cohort after Mawer was **204 PDFs / 873 extracted rows / 112 fixtures**, with 50 registered FMCs. Those test originals, snapshots, candidate review files and runners are **deliberately absent** from this ZIP. These counts describe the previously approved corpus, **not** an executable regression claim for the stripped Ready package.
-
-## 7. Release lineage — v6-5 to current v7 + Mawer
-
-The application label intentionally remains **v7**; the intermediate `v7-5`, `v7-6`, and `v7-7` names describe prior development stages and were ultimately consolidated into the approved v7 baseline.
-
-| Stage | Consolidated changes carried into this edition |
-| --- | --- |
-| **v6-5 (Nov 3, 2026)** | FMC-isolated architecture: manager-specific identity/Series/date/ratio/evidence behavior moved from shared paths into FMC adapters, leaving generic parser and dispatch in shared core. Existing UI, storage and financial formulas were deliberately retained. Historical comparison: 120 PDFs/549 rows, 112 fixtures unchanged. |
-| **v6 evidence-viewer maintenance** | Manager-agnostic `js/evidence-viewer.js` delegates freshness checks to `MRFP_EVIDENCE.needsRefresh`; adapter evidence policies/stamps support safe History revalidation, including legacy BMG policy compatibility. This behavior remains in v7. |
-| **v7 (Nov 18, 2026)** | Seven-module core includes shared dynamic Class/Series recognition (`series-designations.js`) in **both** generated bundles. Recognizes exact letter/multi-letter/alphanumeric, valid named, combined and ETF-related designations in supported financial-table strategies; adds IA Clarington detection/isolation safeguards. Retains strict Total TER policy. |
-| **v7-5 (Nov 19, 2026)** | Expanded complete named/units Series support in **BMO, Dynamic, Fidelity and Invesco** with source/evidence checks. Corrected production skeleton for the then-current 49 adapter sources. Historical original parity: 168 PDFs/761 rows and 112 fixture cases. |
-| **v7-6 (Nov 19, 2026)** | Adapter-focused changes for **RGP**, **Manulife**, **Harvest** and opt-in generic evidence grammar. Compared 49 managers under source-derived future-table scenarios: 42 qualified additions, 7 not certified at that stage. Original corpus remained 198 PDFs/859 rows; 112 fixtures unchanged. |
-| **v7-7 (Nov 19, 2026)** | Verified a separate First Trust ticker-table scenario without production adapter changes; extended **Hamilton** to recognize separately printed Class financial tables and source evidence. Qualified source-derived scenarios reached 44 of 49; unverified scenarios were not silently called passes. Original 198 PDFs/859 rows and 112 fixtures remained unchanged. |
-| **Approved v7 baseline (Nov 19, 2026)** | Source-backed **independent financial-table** recognition added for **BlackRock, Vanguard, Global X, Accelerate, Brompton**. Five additional controlled synthetic layouts brought the combined tested-layout scenarios to 49/49, without claiming universal future issuer support. Original 198-PDF output parity remained intact. |
-| **Unified v7 developer regression (Nov 19, 2026)** | One append-only approved v7 golden and dynamic original PDF/fixture discovery replaced historic executable cross-version parity dependencies. New cases require independent source review and explicit approval; this developer-only subsystem is **not shipped** in this Ready edition. |
-| **Mawer FMC #50 (Nov 19, 2026)** | Added `js/fmc/mawer.js` and manifest registration. Six genuine Mawer 2025 annual/2026 interim MRFPs cover three funds and **14 source-verified rows** (14 MER, 14 PTR, Total TER `null`); **28 numeric physical evidence cells**. Handles `Series F (formerly Series A)` as one 2026 published Series, including exact Data Filter matching in `js/app.js`; corrects supplementary-OCR/native-evidence status in `js/pdf-reader.js`. Developer regression golden expanded append-only from 198 to 204 PDFs and 859 to 873 rows; 112 fixtures preserved. |
-| **v7 Ready production packaging (this edition)** | Production files and complete rebuildable source retained unchanged. Testing suites, input/sample PDFs, historical documents, regression baselines and reports removed. One up-to-date README and one CMD-only skeleton replace outdated documentation. |
-
-### Important qualification of historical coverage
-
-The old added-Series numbers (`42/49`, `44/49`, and `49/49`) were **staged, layout-specific synthetic or source-derived simulations**, not proof that all 50 issuers publish every possible Class/Series table. Similarly, old original-PDF parity checked preservation against a frozen baseline, not independent audit of every financial value. The six Mawer PDFs were real issuer reports, but interactive browser visuals remained a separate acceptance activity.
-
-## 8. Deployment / update checklist
-
-1. Back up the existing project and export important History before switching folders or browser profiles.
-2. Extract the Ready ZIP without renaming/moving its internal paths. Confirm `index.html`, both generated bundles, PDF.js vendor files and both icons are present.
-3. Open `index.html` directly in Chrome/Edge. Validate actual original PDFs from the intended FMCs: manager, complete fund name, report period, published Class/Series, current MER/PTR, explicit Total TER only, and missing values.
-4. Check yellow source highlighting, orange Search focus, page navigation, evidence refresh, edits/Verify, Re-scan, History/Restore and CSV/Excel exports with representative real documents.
-5. Confirm OCR behavior separately online and offline if OCR is required. Keep original PDFs available for manual checking.
-6. Keep a **separate complete Developer baseline** if future FMC regression approvals are planned. This Ready ZIP is not a substitute for the removed test/approved-golden corpus.
-
----
-
-**Current source-of-truth hierarchy:** original Canadian MRFP PDFs for financial values; `dev-tools/fmc-manifest.json` for registered managers; `js/fmc/` and `js/core/` for implemented parsing and evidence behavior; `dev-tools/build.cjs` for deterministic bundles. This README is documentation, not an independent financial audit or source code override.
