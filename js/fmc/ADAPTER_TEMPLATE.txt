@@ -1,0 +1,196 @@
+/*
+ * MRFP Extractor Canada HTML — v7 FMC adapter starter (November 19, 2026)
+ *
+ * FOR NEW FMC #50+ OR A NEW MANAGER-LEVEL LAYOUT STRATEGY.
+ * NOT a working parser: registering this empty template would be incorrect.
+ * Read NEW_FMC_INTEGRATION_MASTER_PROMPT_v7.txt and compare at least two
+ * similar live js/fmc/*.js adapters before implementing any hooks.
+ *
+ * Source of truth: the approved MRFP_Extractor_Canada_HTML_v7 project.
+ * Manifest: dev-tools/fmc-manifest.json (approved starting release:
+ * 49 adapters; new FMCs automatically increase the count).
+ * ONE regression entrypoint: node dev-tools/regression.cjs
+ * Optional new FMC tests: tests/<fmc>.unified-regression.cjs and
+ * tests/<fmc>-reference-data.js; see REGRESSION_BASELINE_V7.md.
+ * Builder: node dev-tools/build.cjs generates js/engine.js and
+ *          js/evidence-locator.js from current source; never edit bundles.
+ *
+ * The v7 core ships js/core/series-designations.js in BOTH generated
+ * bundles. Its mrfpV7SeriesLabel() helper is safe FULL-LABEL heading
+ * recognition only, not independent financial-table discovery or evidence.
+ * Do not duplicate this parser in extraction and evidence or truncate unknown
+ * Series/Class suffixes. Supported complete *recognition* examples include:
+ *   Series A | Series F5 | Series AS | Series PW | Class I Shares
+ *   Series A10 | Series PW5 | Series F-2 | Advisor Series | Private Series
+ *   ETF Units | ETF Series Units | Series F / Private Series
+ * An unsupported name is NOT permission to match a shorter prefix.
+ * A standalone heading, narrative mention, fee description or filename
+ * does NOT establish a reportable ratio table or an extra extraction row.
+ *
+ * For independent added-Series support the adapter must locate a SECOND
+ * self-identifiable ratio panel, preserve the original row, obtain actual
+ * current MER/PTR/eligible TOTAL TER from that panel, and independently
+ * validate each numeric source cell with source PDF.js coordinates.
+ * The approved v7 49/49 results are supported-LAYOUT synthetic simulations,
+ * not all future real-issuer formats. Do not fabricate source values.
+ *
+ * Example manifest entry AFTER implementation + testing (replace all keys):
+ * {"key":"new_key","profile":"profile_new_key",
+ *  "extract":"extract_new_key","file":"js/fmc/new_key.js"}
+ *
+ * Keep these exact section markers at the start of lines:
+ *   // @mrfp:profile
+ *   // @mrfp:extraction
+ *   // @mrfp:evidence
+ */
+
+// @mrfp:profile
+// TODO: replace manager-level identity with authentic legal issuer / manager
+// aliases and corroborating manager-role wording. Never use individual
+// fund names, holdings mentions, historical tickers or source filenames.
+const profile_new_key = {
+  key: 'new_key',
+  label: 'Actual Legal Fund Manager',
+  style: 'new_key',
+  signatures: [/Verified Legal Manager Name/i],
+  // Dynamic fund-title CANDIDATE only: corroborate against cover/report
+  // header and issuer identity. Do not make one example fund title mandatory.
+  title: /^([A-Z][^\r\n]{4,160}\b(?:Fund|Pool|Portfolio|ETF))$/im
+};
+
+// Enable only source-tested FMC-specific settings and optional hooks.
+// const fmcConfig_new_key = {titleScanPages: 3, allowRowFallback: true};
+
+// @mrfp:extraction
+// A COMPLETE source heading is mandatory, but NOT sufficient for a row.
+// This hook is automatically registered by the v7 builder when declared.
+function classHeading_new_key(line) {
+  // The same global helper is compiled into the EVIDENCE bundle.
+  // By default requires a complete standalone designation; if a particular
+  // PDF combines the heading and reporting-year header, separately parse
+  // and validate header geometry before using allowYearColumns:true.
+  return mrfpV7SeriesLabel(line);
+}
+
+function extract_new_key(pages, profile, fund, date) {
+  // TODO: IMPLEMENT AND VALIDATE against real manager-issued MRFP PDFs.
+  //
+  //  1. Confirm actual manager role; dynamically identify COMPLETE fund
+  //     name, annual/interim reporting period and the correct date column.
+  //  2. Identify ALL true ratios/supplemental-financial sections, including
+  //     different pages, moved/reordered/in-between/continued tables.
+  //  3. Associate each table with its OWN complete printed designation.
+  //     Series AS/PW/Advisor/Private/etc. are NOT predefined allowlists.
+  //     One combined heading + one ratio panel -> ONE row;
+  //     two independently published panels -> TWO rows.
+  //  4. Extract latest applicable ACTUAL MER, PTR and TOTAL Expense Ratio
+  //     only if explicitly sourced; Trading TER MUST NOT fill Total TER.
+  //     Do not use before-waiver MER, prior-year values or narrative fees.
+  //  5. Use real missing/null versus printed zero. If no distinct Class or
+  //     Series is published with the ratios, use the complete dynamically
+  //     detected fund name as the class fallback. Generic 'Units' must not
+  //     be upgraded to 'ETF Units' without explicit source designation.
+  //  6. Prove independent ratio-table existence before creating a NEW row.
+  //     Label-only rename, orphan/fee/holdings heading => NO extra row.
+  //     Audit discovered panels versus emitted rows; never create silent
+  //     duplicates, collapsed distinct classes or unsupported guesses.
+  //  7. Keep extracted cell identities/evidence hints linked to source
+  //     page, metric label, current-year column, value and complete Series.
+  //     Evidence verification is independent; do NOT fabricate coordinates.
+  //
+  // This intentionally returns no data until implemented. Do not register
+  // or ship it as a production FMC without genuine extraction and evidence.
+  return [];
+}
+
+// Optional recognized extraction hooks: implement only those needed and
+// verify their signatures against comparable working adapters + builder.
+// function identifyFundEarly_new_key(pages, profile, head) { return undefined; }
+// function identifyFundLate_new_key(pages, profile, head) { return undefined; }
+// function identifyFundFallback_new_key(pages, profile, head) { return undefined; }
+// function selectReportDate_new_key(pages) { /* source-backed date choice */ }
+// function auditRatioHeadings_new_key(pageText, potential) { /* table audit */ }
+
+// @mrfp:evidence
+// This code is in a SEPARATE generated bundle, but mrfpV7SeriesLabel()
+// is already included through js/core/series-designations.js in both.
+function evidenceSeriesHeading_new_key(rawHeading) {
+  // Full designation only; always require an independent ratio-table
+  // source/ownership gate when this result is used for evidence.
+  return mrfpV7SeriesLabel(rawHeading);
+}
+
+function locateCell_new_key(page, lines, row, key, value, context) {
+  // TODO: RETURN CONFIRMED PDF.js source coordinates or null.
+  // Match all of: manager role; complete fund/title; exact canonical
+  // Class/Series or combined label; reporting period/current-year column;
+  // ratio-table ownership; metric row (MER / eligible TOTAL TER / PTR);
+  // exact printed value (including true zero); actual source PDF page;
+  // physical text item/cell geometry, including rotated/reflowed pages.
+  //
+  // Never highlight Trading Expense Ratio as Total TER. Never borrow an
+  // identical number from another fund, class, date, page or fee narrative.
+  // No source match or uncertain geometry => null (unavailable evidence).
+  //
+  // A complete named label only creates independent evidence when there
+  // is a matching complete independent ratio panel. Both numeric values
+  // and the original older-Series highlight must remain correct.
+  return null;
+}
+
+// Optional evidence hooks: implement and version only when source-justified.
+// const evidencePolicy_new_key = {stamps: {newKeyLocatorVersion: 1}};
+// const evidenceLayout_new_key = {newBatch: true};
+// function validateDocumentEvidence_new_key(pages, row) { /* gate */ }
+// function validateAnnualEtfRow_new_key(page, row) { /* gate */ }
+// function ratioHeader_new_key(lines, rowY) { /* metric-table header */ }
+// function locateGap_new_key(page, lines, row, key, value, context) { return null; }
+
+/*
+ * MANDATORY RELEASE TESTS FOR AN IMPLEMENTED FMC:
+ *
+ * [ ] Legal manager ownership positive; unrelated manager mention negative.
+ * [ ] New, never hardcoded same-FMC fund title and complete date/identity.
+ * [ ] Real PDF: complete original tables, latest MER/Total TER/PTR, null/zero.
+ * [ ] Same-layout NEW independent ratio panel: original rows unchanged,
+ *     new full Series/Class label auto-detected and new financial row added.
+ * [ ] Positive full labels as appropriate: Series AS, PW, F5, named Series,
+ *     ETF Units/ETF Series Units and one shared combined-table heading.
+ * [ ] Negative exact identity: A/AA/A(N), F/F-2/F5, PW/PW5/PWN,
+ *     Private Series/Private Series Plus, ETF Units/ETF Series Units.
+ * [ ] No duplicate/orphan/narrative heading rows, false positives or
+ *     merged/incorrectly split independent tables.
+ * [ ] For EACH new MER/PTR/eligible Total TER: exact physical PDF.js page,
+ *     value, period, table row/column and source-coordinate checks.
+ * [ ] No Trading TER as Total TER; true zero vs missing handled correctly.
+ * [ ] One normal release test command, regardless of current FMC/PDF count:
+ *         node dev-tools/regression.cjs
+ *     This builds both classic bundles, scans all PDFs, compares all saved
+ *     fixtures, and executes configured FMC detection/isolation/evidence,
+ *     future-Series and optional *.unified-regression.cjs safety suites.
+ *     Review dev-tools/reports/unified-regression-report.json and require
+ *     zero unexpected mismatches and zero missing/unapproved items.
+ * [ ] The approved 198 PDFs / 859 rows / 112 fixtures are the protected
+ *     STARTING v7 reference, not a maximum or a hardcoded target. Only the
+ *     single dev-tools/baselines/v7-regression-golden.json is active.
+ * [ ] Add new real MRFP source PDFs under tests/fixtures/new-fmc-pdfs/
+ *     (or batch-test/pdfs/). Unknown files will be discovered and reported
+ *     UNAPPROVED; do not turn extractor output into automatic ground truth.
+ * [ ] Independently verify all source tables, complete Class/Series,
+ *     dates, actual MER/PTR, eligible TOTAL TER, null/zero, and real PDF.js
+ *     evidence boxes; check for omitted rows as well as extracted values.
+ *     Copy dev-tools/reports/regression-candidates.json to
+ *     dev-tools/reports/regression-reviewed.json and complete reviewer,
+ *     notes, and required verification fields truthfully.
+ * [ ] After independent review, explicitly append ONLY new expected cases:
+ *         node dev-tools/regression.cjs --approve-reviewed dev-tools/reports/regression-reviewed.json
+ *     The runner preserves the original golden entries and makes a backup.
+ *     Run normal node dev-tools/regression.cjs again to verify full parity.
+ * [ ] --filter 'FMC_or_filename' is for debugging only, NOT full release
+ *     qualification or approval. Do not use legacy v5/v6 source runners.
+ * [ ] Test visual yellow evidence/orange Search, History/Restore, UI,
+ *     exports and offline Chrome/Edge where actual browser QA is possible.
+ * [ ] Report every unrun test, unsupported layout and real-PDF limitation.
+ *
+ * No dependency on dev-tools/v5-baseline or any earlier engine bundles.
+ */

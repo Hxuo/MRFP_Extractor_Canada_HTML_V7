@@ -1,0 +1,1394 @@
+/* Standalone browser UI — no server, npm, Python or Node.js at runtime. */
+(function(global){
+'use strict';
+const $=id=>document.getElementById(id);
+const store=global.MRFP_STORAGE,engine=global.MRFP_ENGINE,reader=global.MRFP_PDF,out=global.MRFP_EXPORT;
+let selectedFile=null,active=null,previewUrl=null,stagedRescan=null,busy=false;
+let dataFilterState={active:false,source:'paste',rawText:'',entries:[],matches:[],unmatched:[],matchedCount:0,page:0};
+let excelFilterWorkbook=null,excelFilterBusy=false,excelFilterPreviewPage=0;
+// Cached index of every saved extraction, not just the document currently shown.
+let filterDocumentCache=[];
+let recentListedHashes=new Set();
+// UI-only state: keep independent fund tables collapsed across edit/re-render.
+const collapsedResultFunds=new Map();
+const html=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=x=>x===null||x===undefined||x===''?'—':Number(x).toFixed(2);
+function fundSubline(row){const fund=String(row?.fund_name||'').trim(),label=String(row?.class_name||'').trim();return fund&&label&&fund.toLocaleLowerCase()===label.toLocaleLowerCase()?'':`<div class="unit">${html(fund)}</div>`;}
+// Group only genuine multi-fund extractions; keep single-fund layouts unchanged.
+// Original result indices are retained for Edit, Search and storage semantics.
+function financialResultRows(indexed,grouped=false){
+ return indexed.map(({row:r,index:i})=>`<tr id="resultrow${i}" data-index="${i}">
+     <td>${html(r.class_name)}${grouped?'':fundSubline(r)}</td>
+     <td class="number">${fmt(r.MER)}</td><td class="number">${fmt(r.TER)}</td><td class="number">${fmt(r.PTR)}</td>
+     <td class="small">${html(displayDate(r.report_date))}</td>
+     <td><span class="result-actions"><button class="ghost locate" data-index="${i}" title="Locate values in PDF" aria-label="Locate PDF evidence for ${html(r.class_name)}" ${!active?.blob?'disabled':''}><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button><button class="ghost edit" data-index="${i}">Edit</button></span></td></tr>`).join('');
+}
+function financialResultTable(indexed,grouped=false){
+ return `<div class="scroller"><table aria-label="Extracted financial ratios">
+   <thead><tr><th>Class / Series</th><th>MER</th><th title="Total Expense Ratio (TER)">TER</th><th>PTR</th><th>MRFP date</th><th>Action</th></tr></thead>
+   <tbody>${financialResultRows(indexed,grouped)}</tbody></table></div>`;
+}
+function financialResultTables(results,doc){
+ const indexed=results.map((row,index)=>({row,index}));
+ const groups=new Map();
+ for(const item of indexed){
+  const fund=String(item.row.fund_name||'').trim()||'Fund not detected';
+  if(!groups.has(fund))groups.set(fund,[]);
+  groups.get(fund).push(item);
+ }
+ // No change at all to the presentation of the established one-fund format.
+ if(groups.size<2)return financialResultTable(indexed);
+ return [...groups].map(([fund,rows],groupIndex)=>{
+  const stateKey=String(doc.hash||doc.filename||'')+'\\0'+fund;
+  const collapsed=collapsedResultFunds.get(stateKey)===true;
+  const tableId='fundresulttable'+groupIndex;
+  return `<section class="fund-result-group" aria-label="${html(fund)}">
+   <div class="fund-result-header">
+    <button type="button" class="fund-group-toggle" data-group="${groupIndex}" aria-controls="${tableId}" aria-expanded="${!collapsed}" aria-label="${collapsed?'Expand':'Collapse'} ${html(fund)}" title="${collapsed?'Expand':'Collapse'} this fund's table"><span aria-hidden="true">${collapsed?'▸':'▾'}</span></button>
+    <button type="button" class="fund-group-jump" data-index="${rows[0].index}" title="Locate ${html(fund)} in the source PDF (same as Search)" ${!doc.blob?'disabled':''}>${html(fund)}</button>
+    <span class="fund-group-meta">${rows.length} class${rows.length===1?'':'es'} / series</span>
+   </div>
+   <div id="${tableId}" class="fund-result-table${collapsed?' hidden':''}">${financialResultTable(rows,true)}</div>
+  </section>`;
+ }).join('');
+}
+function status(message,percent){$('status').textContent=message;if(percent!==undefined)$('progressBar').style.width=Math.max(0,Math.min(100,percent))+'%';}
+function error(e){status(e?.message||String(e));$('libnotice').textContent=(e?.message||String(e));$('libnotice').className='libnotice error';console.error(e);}
+function setBusy(b){busy=b;$('extract').disabled=b;$('rescan').disabled=b;$('extractText').disabled=b;$('pdf').disabled=b;$('settingsOpen').disabled=b;document.querySelectorAll('.nav-btn').forEach(n=>n.disabled=b);updateBatchDisplay();updateRecentListControls();}
+function notices(message,good=false){$('libnotice').textContent=message;$('libnotice').className='libnotice '+(good?'good':'');}
+async function ensureLibrary(){
+ try{await reader.ensurePdf();notices('PDF.js ready. PDFs are processed in this browser; no document is uploaded to a server.',true);return true;}
+ catch(e){notices('PDF.js unavailable — check the bundled vendor files or use the paste-text fallback.');$('fallback').classList.remove('hidden');return false;}
+}
+function viewPdf(blob){
+ // v5 retains the original browser iframe as a reliable fallback only.
+ // PDF.js source browsing is isolated from the financial extraction engine.
+ return global.MRFP_EVIDENCE_VIEWER.open(blob,active).catch(error);
+}
+
+function stageSelectedFile(file){
+ if(busy)return;
+ resetDataFilter(false);
+ selectedFile=file||null;
+ $('filename').textContent=selectedFile?.name||'No PDF selected';
+ viewPdf(selectedFile); // Preview must not wait for the Extract button or PDF.js.
+ // The previous document's ratios must not be shown next to a newly selected PDF.
+ active=null;stagedRescan=null;
+ $('result').replaceChildren();$('details').replaceChildren();
+ $('download').classList.add('hidden');$('actions').classList.add('hidden');
+ $('rescanPanel').classList.add('hidden');$('overview').classList.remove('hidden');
+ status(selectedFile?'PDF selected — preview ready; click Extract ratios':'Ready',0);
+ history().catch(error);
+}
+function inspectDoc(d){
+ active=d;
+ const batchEntry=batchEntries?.find(e=>e.hash===d.hash);if(batchEntry)batchEntry.snapshot=d;
+ $('filename').textContent=d.filename||'Saved report';
+ $('download').classList.toggle('hidden',!(d.results||[]).length);
+ $('overview').classList.add('hidden');$('actions').classList.remove('hidden');
+ const results=d.results||[];
+ const scanInfo=(d.diagnostics||[]).find(x=>x&&x.fmc_detection?.status==='matched')||{};
+ const funds=[...new Set(results.map(r=>r.fund_name).filter(Boolean))],fmcs=[...new Set(results.map(r=>r.fmc||r.fmc_key).filter(Boolean))];
+ if(!funds.length&&scanInfo.fund_name)funds.push(scanInfo.fund_name);
+ if(!fmcs.length&&(scanInfo.fmc_label||scanInfo.fmc_detection?.fmc_key)){
+  const key=scanInfo.fmc_detection?.fmc_key;
+  fmcs.push(scanInfo.fmc_label||engine.REGISTRY.find(p=>p.key===key)?.label||key);
+ }
+ const nMissing=results.reduce((s,r)=>s+['MER','TER','PTR'].filter(k=>r[k]===null||r[k]===undefined).length,0);
+ $('result').innerHTML=`
+  <div class="stats">
+   <div class="stat"><b>${results.length}</b><small>Classes / series</small></div>
+   <div class="stat"><b>${results.length*3-nMissing}</b><small>Values extracted</small></div>
+   <div class="stat"><b>${nMissing}</b><small>Missing values</small></div>
+   <div class="stat"><b>${d.verified?'Verified':'Unverified'}</b><small>Review status</small></div>
+  </div>
+  <div class="fund-info"><strong>FMC:</strong><span>${html(fmcs.join(', ')||'Unrecognized')}</span> <strong>Fund:</strong><span>${html(funds.join(' · ')||'Not detected')}</span></div>
+  ${!results.length?'<div class="notice">No confident financial ratios found. Verify the PDF table manually; missing values were not invented.</div>':
+  `${financialResultTables(results,d)}`}
+  ${d.notes?.length?`<p class="notice">${html(d.notes.join(' | '))}</p>`:''}
+ `;
+ $('verify').textContent=d.verified?'✓ Verified':'Mark results as verified';
+ $('details').innerHTML=`<details><summary>Extraction details</summary><p class="muted">Source: ${html(d.filename)} · Last scanned: ${html(new Date(d.updated||Date.now()).toLocaleString())} · ${html(d.source||'PDF.js native text')}</p><p class="muted">TER means Total Expense Ratio only; Trading Expense Ratio is never substituted. Missing Total Expense Ratios remain blank. OCR results should be verified against the source tables.</p></details>`;
+ $('rescanPanel').classList.add('hidden');stagedRescan=null;
+ $('result').querySelectorAll('button.edit').forEach(b=>b.addEventListener('click',()=>beginEdit(Number(b.dataset.index))));
+ $('result').querySelectorAll('button.fund-group-toggle').forEach(button=>button.addEventListener('click',()=>{
+  const target=$('fundresulttable'+button.dataset.group);
+  if(!target)return;
+  const collapsed=!target.classList.contains('hidden');
+  target.classList.toggle('hidden',collapsed);
+  button.setAttribute('aria-expanded',String(!collapsed));
+  button.setAttribute('aria-label',(collapsed?'Expand ':'Collapse ')+button.closest('.fund-result-group')?.querySelector('.fund-group-jump')?.textContent);
+  button.title=(collapsed?'Expand':'Collapse')+" this fund's table";
+  button.querySelector('span').textContent=collapsed?'▸':'▾';
+  const fund=button.closest('.fund-result-group')?.querySelector('.fund-group-jump')?.textContent||'';
+  collapsedResultFunds.set(String(active?.hash||active?.filename||'')+'\\0'+fund,collapsed);
+ }));
+ // Same verified source navigation as the row's Search button, scoped to this fund.
+ $('result').querySelectorAll('button.fund-group-jump').forEach(button=>button.addEventListener('click',()=>global.MRFP_EVIDENCE_VIEWER.focusRow(active?.results?.[Number(button.dataset.index)]).catch(error)));
+
+ $('result').querySelectorAll('button.locate').forEach(b=>b.addEventListener('click',()=>global.MRFP_EVIDENCE_VIEWER.focusRow(active?.results?.[Number(b.dataset.index)]).catch(error)));
+ global.MRFP_EVIDENCE_VIEWER.updateDoc(d);
+ if(dataFilterState.active){$('details').classList.add('hidden');$('actions').classList.add('hidden');renderFilteredResults();}
+ else{$('details').classList.remove('hidden');$('actions').classList.remove('hidden');}
+ updateDataFilterControls();
+ updateRecentListControls();
+}
+function displayDate(v){if(!v)return '—';const m=/^(\d{4})-(\d\d)-(\d\d)$/.exec(v);return m?`${m[2]}/${m[3]}/${m[1]}`:v;}
+function beginEdit(i){
+ if(!active||busy)return;
+ const row=active.results[i],tr=$('resultrow'+i);if(!tr)return;
+ tr.classList.add('editing');
+ const numeric=x=>x===null||x===undefined?'':x;
+ tr.innerHTML=`<td><strong>${html(row.class_name)}</strong>${fundSubline(row)}</td>
+ ${['MER','TER','PTR'].map(k=>`<td><input aria-label="${k}" class="editInput" type="text" inputmode="decimal" data-metric="${k}" value="${html(numeric(row[k]))}" placeholder="blank"></td>`).join('')}
+ <td><input class="textInput" aria-label="Report date" id="editDate${i}" type="date" value="${html(row.report_date||'')}"></td>
+ <td><button class="secondary doSave">Save</button> <button class="ghost doCancel">Cancel</button></td>`;
+ tr.querySelector('.doCancel').onclick=()=>inspectDoc(active);
+ tr.querySelector('.doSave').onclick=()=>saveEdit(i,tr);
+ tr.querySelectorAll('input').forEach(inp=>inp.onkeydown=e=>{if(e.key==='Enter')saveEdit(i,tr);if(e.key==='Escape')inspectDoc(active);});
+ tr.querySelector('input')?.focus();
+}
+
+
+function confirmManualEdit(previous, fields, date) {
+  const modal = $('editConfirmModal');
+
+  if (modal.open) return Promise.resolve(false);
+
+  $('editConfirmSubject').textContent =
+    previous.class_name || 'Selected class / series';
+
+  const list = $('editChangeList');
+  list.replaceChildren();
+
+  const changes = [
+    ['MER', previous.MER, fields.MER, fmt],
+    ['TER', previous.TER, fields.TER, fmt],
+    ['PTR', previous.PTR, fields.PTR, fmt],
+    [
+      'MRFP Date',
+      previous.report_date || null,
+      date || null,
+      displayDate
+    ]
+  ];
+
+  for (const [name, before, after, format] of changes) {
+    if (before === after) continue;
+
+    const row = document.createElement('div');
+    row.className = 'edit-change-row';
+
+    const label = document.createElement('span');
+    label.className = 'edit-change-label';
+    label.textContent = name;
+
+    const values = document.createElement('div');
+    values.className = 'edit-change-values';
+
+    const oldVal = document.createElement('span');
+    oldVal.className = 'edit-change-before';
+    oldVal.textContent = format(before);
+
+    const arrow = document.createElement('span');
+    arrow.className = 'edit-change-arrow';
+    arrow.textContent = '→';
+
+    const newVal = document.createElement('span');
+    newVal.className = 'edit-change-after';
+    newVal.textContent = format(after);
+
+    values.append(oldVal, arrow, newVal);
+    row.append(label, values);
+    list.appendChild(row);
+  }
+
+  if (!list.childElementCount) {
+    const note = document.createElement('p');
+    note.className = 'edit-no-changes';
+
+    note.textContent =
+      'No value differences detected. Saving will still ' +
+      'mark the document Unverified.';
+
+    list.appendChild(note);
+  }
+
+  return new Promise(resolve => {
+    let approved = false;
+
+    modal.onclose = () => resolve(approved);
+
+    $('editConfirmSave').onclick = () => {
+      approved = true;
+      modal.close();
+    };
+
+    $('editConfirmCancel').onclick = () => modal.close();
+    $('editConfirmClose').onclick = () => modal.close();
+
+    modal.onclick = event => {
+      if (event.target === modal) modal.close();
+    };
+
+    modal.showModal();
+    $('editConfirmCancel').focus();
+  });
+}
+
+async function saveEdit(i,tr){
+ try{
+  const fields={};for(const inp of tr.querySelectorAll('[data-metric]')){
+   const value=inp.value.trim();
+   if(!value){fields[inp.dataset.metric]=null;continue;}
+   if(!/^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?$/.test(value))throw Error('Enter a valid number or leave blank: '+inp.dataset.metric);
+   fields[inp.dataset.metric]=Number(value.replace(/[,%]/g,''));
+  }
+  const date=$('editDate'+i).value;
+  if(!await confirmManualEdit(active.results[i],fields,date))return;
+  const updated=structuredClone(active),row=updated.results[i];
+  Object.assign(row,fields,{report_date:date||null,year:date?Number(date.slice(0,4)):null,needs_review:!date});
+  // Keep source evidence and original scanned values distinct from manual corrections.
+  if(!row.originalValues)row.originalValues={MER:active.results[i].MER,TER:active.results[i].TER,PTR:active.results[i].PTR};
+  row.manualCorrections=row.manualCorrections||{};
+  for(const k of ['MER','TER','PTR'])if(fields[k]!==active.results[i][k])row.manualCorrections[k]=true;
+  row.evidence=row.evidence||{}; // Do not discard original source page/coordinates.
+  updated.verified=false;updated.has_corrections=true;updated.updated=Date.now();
+  await store.put(updated);active=updated;inspectDoc(updated);await history();updateHistoryReturn();
+  status('Correction saved',100);
+ }catch(e){alert(e.message);}
+}
+function updateRecentListControls(){
+ const button=$('removeFromList');
+ if(!button)return;
+ const selected=!!(active?.hash&&recentListedHashes.has(active.hash));
+ button.disabled=busy||!selected;
+ button.title=selected?`Remove ${docFundName(active)} from Recent Documents`:'Select a document in Recent Documents first';
+ document.querySelectorAll('#history button.item').forEach(item=>item.classList.toggle('active',item.dataset.hash===active?.hash&&selected));
+}
+async function history(){
+ const list=await store.listed();
+ recentListedHashes=new Set(list.map(d=>d.hash).filter(Boolean));
+ await refreshFilterDocumentCache();
+ $('exportListed').classList.toggle('hidden',!list.length);
+ $('recentCount').textContent=`${list.length} listed`;
+ $('clearList').disabled=busy||!list.length;
+ updateRecentListControls();
+ $('history').innerHTML=list.map(d=>`<button type="button" class="item ${active?.hash===d.hash?'active':''}" data-hash="${html(d.hash)}" title="Open saved results for ${html(d.filename)}"><span class="recent-item-name">${html(docFundName(d))}</span><span class="recent-item-file">${html(d.filename)}</span><span class="meta">${(d.results||[]).length} classes · ${html(docMRFPDate(d))} · ${html(new Date(d.updated||0).toLocaleString())} · ${d.verified?'Verified':'Unverified'}</span></button>`).join('')||'<p class="muted recent-empty">No recent documents yet. Extract a PDF or restore a saved fund from History.</p>';
+ $('history').querySelectorAll('button.item').forEach(b=>b.onclick=async()=>{
+  if(busy)return;
+  currentBatchSelection=null;openedFromHistory=false;updateHistoryReturn();
+  await loadSaved(b.dataset.hash);updateBatchDisplay();
+ });
+ await renderHistoryPage(); if(pageName==='reports')await renderReports();
+ for(const entry of batchEntries){if(entry.hash){const latest=await store.get(entry.hash);if(latest)entry.snapshot=latest;}}
+ updateBatchDisplay();
+}
+async function loadSaved(hash){
+ const d=await store.get(hash);if(!d)throw Error('Document missing from local browser storage');
+ resetDataFilter(false);
+ // History selection overrides a pending upload, including the native file input.
+ selectedFile=null;$('pdf').value='';
+ inspectDoc(d);viewPdf(d.blob);status(d.blob?'Loaded from history':'History loaded — original PDF not available.',100);await history();
+}
+async function runAnalysis(file,{previewOnly=false}={}){
+ const data=await reader.readFile(file,{onProgress:(p,n,message)=>{status(message);const entry=batchEntries.find(e=>e.state==='processing');if(entry){entry.message=message;updateBatchDisplay();}},ocrEnabled:prefs.ocr!==false});
+ const extracted=engine.analyzePages(data.pages);
+ if(extracted?.results?.length && extracted?.results.some(x=>!x.row_id))console.warn('Missing row identifiers');
+ // Evidence location is a read-only post-processing step. It NEVER edits
+ // financial values or the existing FMC-specific parsing logic.
+ let evidenceMap=null;
+ try{evidenceMap=global.MRFP_EVIDENCE.locate(data.pages,extracted.results||[]);}
+ catch(e){console.warn('v5 evidence location unavailable; extraction was preserved',e);}
+ return {...extracted,notes:data.notes,evidenceMap};
+}
+async function legacyScanFile(){
+ if(!selectedFile){alert('Choose a PDF file first.');return;}
+ if(busy)return;setBusy(true);status('Checking browser history…',3);
+ try{
+  if(!/^application\/pdf$/i.test(selectedFile.type)&&!selectedFile.name.toLowerCase().endsWith('.pdf'))throw Error('Please select a PDF');
+  const hash=await store.fingerprint(selectedFile);
+  let doc=await store.get(hash);
+  if(!doc){
+   const analysis=await runAnalysis(selectedFile);
+   doc={hash,filename:selectedFile.name,blob:selectedFile,results:analysis.results,diagnostics:analysis.diagnostics,notes:analysis.notes,evidenceMap:analysis.evidenceMap,verified:false,has_corrections:false,source:'PDF.js native / optional OCR',terDefinition:'total-expense-ratio-v1',created:Date.now()};
+   await store.put(doc);status(analysis.results.length?'Scan saved':'No confident ratio tables detected',100);
+  } else{
+   // Never overwrite existing successful, manually corrected or verified data.
+   // Empty scans from an older parser are safe to retry on a fresh upload;
+   // otherwise a cached 0-row result could mask the updated Global X fix.
+   if(!(doc.results||[]).length && !doc.has_corrections && !doc.verified){
+    const analysis=await runAnalysis(selectedFile);
+    if(analysis.results.length){
+     doc.results=analysis.results;doc.diagnostics=analysis.diagnostics;
+     doc.notes=analysis.notes;doc.evidenceMap=analysis.evidenceMap;doc.source='PDF.js native / optional OCR';
+     doc.blob=selectedFile;doc.terDefinition='total-expense-ratio-v1';await store.put(doc);
+     status('Previous empty scan replaced with newly detected results',100);
+    }else{
+     if(!doc.blob){doc.blob=selectedFile;await store.put(doc);}
+     status('No confident ratio tables detected — prior empty record kept',100);
+    }
+   }else{
+    if(!doc.blob){doc.blob=selectedFile;await store.put(doc);}
+    status('Existing saved extraction loaded; use Re-scan to replace',100);
+   }
+  }
+  await store.addToWorkspace(hash);inspectDoc(doc);viewPdf(doc.blob);await history();
+ }catch(e){error(e);}finally{setBusy(false);}
+}
+async function scanPasted(){
+ const text=$('manualText').value.trim();if(!text){alert('Paste your MRFP text first.');return;}
+ if(busy)return;setBusy(true);
+ try{
+  const pages=reader.fromPastedText(text),analysis=engine.analyzePages(pages);
+  const bytes=new TextEncoder().encode(text),blob=new Blob([bytes],{type:'text/plain'});
+  const hash='manual-'+[...bytes.slice(0,32)].reduce((a,b)=>((a*31+b)>>>0),bytes.length).toString(16)+'-'+bytes.length;
+  let doc={hash,filename:'Pasted MRFP text',blob:null,results:analysis.results,diagnostics:analysis.diagnostics,notes:['Text-paste fallback: check results carefully; PDF geometry is unavailable.'],verified:false,has_corrections:false,source:'Manual text pasted',terDefinition:'total-expense-ratio-v1',created:Date.now()};
+  await store.put(doc);await store.addToWorkspace(hash);inspectDoc(doc);viewPdf(null);await history();status('Pasted text analyzed',100);
+ }catch(e){error(e);}finally{setBusy(false);}
+}
+async function rescan(){
+ if(!active)return;if(!active.blob){alert('Original PDF not retained in browser storage. Re-upload the file to scan again.');return;}
+ if(busy)return;setBusy(true);status('Re-scanning saved PDF…',4);
+ try{
+  const analysis=await runAnalysis(active.blob);
+  if(!analysis.results.length)throw Error('No confident results in re-scan; original saved data preserved.');
+  stagedRescan={results:analysis.results,diagnostics:analysis.diagnostics,notes:analysis.notes,evidenceMap:analysis.evidenceMap,originalHash:active.hash,token:active.updated};
+  const before=new Map((active.results||[]).map(r=>[r.row_id,r]));
+  $('rescanComparison').innerHTML=`<table><thead><tr><th>Class</th><th>Previous MER / TER / PTR</th><th>New MER / TER / PTR</th><th>Change</th></tr></thead><tbody>${analysis.results.map(r=>{
+   const old=before.get(r.row_id)||active.results.find(x=>x.class_name===r.class_name),change=!old||['MER','TER','PTR'].some(k=>old[k]!==r[k]);
+   return `<tr class="${change?'diff':''}"><td>${html(r.class_name)}</td><td>${old?['MER','TER','PTR'].map(k=>fmt(old[k])).join(' / '):'New class'}</td><td>${['MER','TER','PTR'].map(k=>fmt(r[k])).join(' / ')}</td><td>${change?'Changed':'Same'}</td></tr>`;
+  }).join('')}</tbody></table>`;
+  $('rescanMessage').textContent=`Found ${analysis.results.length} classes. Existing manual edits will be replaced only if you click Yes, Replace Results.`;
+  $('rescanPanel').classList.remove('hidden');status('Re-scan preview ready — review changes',100);
+ }catch(e){error(e);}finally{setBusy(false);}
+}
+
+function askRescanReplace() {
+  const dialog = $('rescanReplaceDialog');
+
+  if (!dialog) {
+    console.error('Re-scan confirmation dialog not found.');
+    return Promise.resolve(false);
+  }
+
+  if (dialog.open) {
+    return Promise.resolve(false);
+  }
+
+  $('rescanReplaceSummary').textContent =
+    `${stagedRescan?.results?.length || 0} proposed classes · ` +
+    `${active?.results?.length || 0} currently saved`;
+
+  // Reset any decision from the previous opening.
+  dialog.returnValue = 'cancel';
+
+  return new Promise(resolve => {
+    const onClose = () => {
+      resolve(dialog.returnValue === 'replace');
+    };
+
+    // Only one close listener per opening.
+    dialog.addEventListener('close', onClose, { once: true });
+
+    try {
+      dialog.showModal();
+    } catch (err) {
+      dialog.removeEventListener('close', onClose);
+      console.error('Cannot open Re-scan modal:', err);
+      resolve(false);
+    }
+  });
+}
+
+async function confirmRescan(){
+ if(!stagedRescan||!active||stagedRescan.originalHash!==active.hash)return;
+ if (!await askRescanReplace()) return;
+ const original=await store.get(active.hash);
+ if(!original||original.updated!==stagedRescan.token){alert('Saved document has changed. Run Re-scan again.');return;}
+ original.results=stagedRescan.results;original.diagnostics=stagedRescan.diagnostics;original.notes=stagedRescan.notes;original.evidenceMap=stagedRescan.evidenceMap;original.verified=false;original.has_corrections=false;original.terRequiresRescan=false;original.terDefinition='total-expense-ratio-v1';
+ await store.put(original);inspectDoc(original);viewPdf(original.blob);await history();updateHistoryReturn();status('Re-scan saved; verification reset',100);
+}
+function download(blob,filename){
+ const link=document.createElement('a'),url=URL.createObjectURL(blob);
+ link.href=url;link.download=filename;document.body.appendChild(link);link.click();link.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),15000);
+}
+async function exportDocs(scope,type='xlsx'){
+ try{
+  const docs=scope==='current'?(active?[await store.get(active.hash)||active]:[]):scope==='all'?await store.all():await store.listed();
+  if(!docs.length){alert('No documents available to export.');return;}
+  const basename=scope==='current'?'Current_Document':scope==='all'?'All_Funds':'Listed_Funds';
+  download(type==='csv'?out.csv(docs):out.excel(docs),`MRFP_${basename}.${type}`);
+ }catch(e){error(e);}
+}
+
+
+function normalizeDataFilterText(value){
+ return String(value??'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+  .replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+}
+function cleanDataFilterLine(line){
+ let value=String(line??'').trim();
+ value=value.replace(/^\s*(?:[•*–—-]\s*|\d+[.)]\s*)/,'');
+ // Long numeric reference IDs are metadata, not part of the fund name.
+ // Four-digit fund/year labels remain intact.
+ if(/^\d{4,}$/.test(value))return '';
+ value=value.replace(/^\s*\d{5,}\s*(?:[-–—:|,]\s*|\s+)(?=[A-Za-z])/,'');
+ value=value.replace(/\s+\d{5,}\s*$/,'');
+ value=value.replace(/^\s*[-–—:|,]+\s*/,'');
+ return value.trim();
+}
+function parseDataFilterLine(line){
+ let value=String(line??'').trim();
+ value=value.replace(/^\s*(?:[•*–—-]\s*|\d+[.)]\s*)/,'');
+ let lipperId='';
+ // Lipper ID may be pasted before or after the fund name. Capture it as
+ // export metadata while keeping it out of all fund/class matching logic.
+ const leading=value.match(/^(\d{5,})(?=$|\s|[-–—:|,])/);
+ if(leading){
+  lipperId=leading[1];
+  value=value.slice(leading[0].length).replace(/^\s*[-–—:|,]+\s*/,'').trim();
+ }
+ const trailing=value.match(/(?:^|\s|[-–—:|,])(\d{5,})\s*$/);
+ if(trailing){
+  if(!lipperId)lipperId=trailing[1];
+  value=value.slice(0,trailing.index).replace(/[\s\-–—:|,]+$/,'').trim();
+ }
+ return {name:cleanDataFilterLine(value),lipperId};
+}
+function parseDataFilterEntries(rawText){
+ const byName=new Map(),entries=[];
+ for(const raw of String(rawText??'').split(/\r?\n/)){
+  const parsed=parseDataFilterLine(raw),name=parsed.name,normalized=normalizeDataFilterText(name);
+  if(!name||!normalized)continue;
+  const existing=byName.get(normalized);
+  if(existing){
+   // If the same request is pasted more than once, retain an available ID
+   // from either line without creating duplicate matching rows.
+   if(!existing.lipperId&&parsed.lipperId)existing.lipperId=parsed.lipperId;
+   continue;
+  }
+  const entry={raw,name,normalized,lipperId:parsed.lipperId||''};
+  byName.set(normalized,entry);entries.push(entry);
+ }
+ return entries;
+}
+async function refreshFilterDocumentCache(){
+ // Data Needed Only is intentionally scoped to the Recent Documents workspace.
+ // Saved History documents that have not been restored/listed are excluded.
+ const listed=await store.listed(),byHash=new Map();
+ for(const entry of batchEntries){
+  if(entry.hash&&['completed','partial'].includes(entry.state))byHash.set(entry.hash,entry);
+ }
+ const docs=new Map();
+ const add=(doc,entryId=null,sourceName='')=>{
+  if(!doc||!Array.isArray(doc.results)||!doc.results.length)return;
+  const key=doc.hash||`${sourceName||doc.filename||'document'}:${entryId??'listed'}`;
+  if(docs.has(key))return;
+  docs.set(key,{doc,entryId,sourceName:sourceName||doc.filename||'Unknown PDF'});
+ };
+ for(const doc of listed){
+  const entry=byHash.get(doc.hash);
+  add(doc,entry?.id??null,entry?.file?.name||doc.filename);
+ }
+ filterDocumentCache=[...docs.values()];
+ return filterDocumentCache;
+}
+function collectFilterDocuments(){
+ return filterDocumentCache;
+}
+function normalizeDataFilterClassText(value){
+ return String(value??'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+  .replace(/[–—−]/g,'-').replace(/&/g,' and ')
+  // A dash separating a descriptor from its code is punctuation, not part
+  // of the class identifier: "Class - C3" -> "class c3".
+  // Likewise, "A-Class" and "A Class" describe the same class.
+  // Do not alter identifier-internal suffixes such as F-2 or numeric 75/75.
+  .replace(/\b(class|series)\s*-\s*(?=[a-z0-9])/g,'$1 ')
+  .replace(/\b([a-z0-9]+)\s*-\s*(class|series)\b/g,'$1 $2')
+  // Treat a hyphen adjacent to the word "Series" as a word separator,
+  // while preserving code suffixes such as F-2 as a single identifier.
+  .replace(/\bseries-/g,'series ').replace(/-series\b/g,' series')
+  .replace(/[^a-z0-9\/-]+/g,' ').replace(/\s*-\s*/g,'-')
+  .replace(/\s*\/\s*/g,' / ').replace(/\s+/g,' ').trim();
+}
+function classDescriptorCodes(value){
+ const normalized=normalizeDataFilterClassText(value);
+ if(!normalized)return [];
+ // Split only on a spaced slash (or the word "and"). This preserves
+ // legitimate codes such as 75/75 while recognizing combined table headings.
+ const parts=normalized.split(/\s+\/\s+|\s+and\s+/).filter(Boolean);
+ const hasSeries=parts.some(part=>/\bseries\b/.test(part));
+ const hasClass=parts.some(part=>/\bclass\b/.test(part));
+ const generic=new Set(['class','series','share','shares','unit','units','the','of','and','fund','annual','interim','semi','semiannual','report','financial','statement','statements']);
+ const codes=[];
+ for(let part of parts){
+  // In combined headings like "Investor / Advisor Series", the final
+  // descriptor applies to both sides of the slash.
+  if(hasSeries&&!/\b(?:series|class)\b/.test(part))part+=' series';
+  else if(hasClass&&!/\b(?:series|class)\b/.test(part))part+=' class';
+  const tokens=part.split(' ').filter(token=>token&&!generic.has(token)&&!/^\d{4}$/.test(token));
+  if(!tokens.length)continue;
+  let code=tokens.join(' ');
+  // PDF text and pasted lists may represent F-2 as either "F-2" or "F 2".
+  if(tokens.length===2&&/^[a-z]$/.test(tokens[0])&&/^\d+$/.test(tokens[1]))code=`${tokens[0]}-${tokens[1]}`;
+  else if(tokens.length===2&&/^\d+$/.test(tokens[0])&&/^\d+$/.test(tokens[1]))code=`${tokens[0]}/${tokens[1]}`;
+  codes.push(code);
+ }
+ return [...new Set(codes)];
+}
+function classQualifierMatches(qualifier,className,classAliases=[]){
+ const qualifierText=normalizeDataFilterClassText(qualifier);
+ if(!qualifierText)return true; // No class qualifier means all classes for the fund.
+ // Arrow Capital's historical names are written as "AN Series" / "A Series",
+ // whereas current identities are "Series A" / "Series AD". Match an
+ // explicit old-style alias only against the row's declared alias list.
+ // This also ensures a bare "A" selects current Series A, not Series AD.
+ const aliasStyle=/^[a-z0-9-]+\s+series$/i.test(qualifierText);
+ if(aliasStyle&&Array.isArray(classAliases)&&classAliases.length){
+  return classAliases.some(alias=>normalizeDataFilterClassText(alias)===qualifierText);
+ }
+ // If the user pastes the full display name, strip only its trailing
+ // re-designation note before applying the existing exact class-code logic.
+ // Printed redesignation notes identify the SAME current ratio Series.
+ // Do not treat the historical parenthetical as a second independent class.
+ const canonicalText=qualifierText.replace(/\s+re-designated\s+from\s+.+$/i,'')
+  .replace(/^((?:series|class)\s+[a-z][a-z0-9-]{0,11})\s+formerly\s+(?:series|class)\s+[a-z][a-z0-9-]{0,11}$/i,'$1').trim();
+ const requested=classDescriptorCodes(canonicalText);
+ if(!requested.length)return true;
+ const available=classDescriptorCodes(className);
+ if(!available.length)return false;
+ // Exact canonical code matching prevents Series F from including Series F-2.
+ // A requested component may still match a combined published heading such
+ // as "Series F / Private Series" because that row represents one table.
+ return requested.every(code=>available.includes(code));
+}
+function dataFilterRowFundParts(row){
+ const fundText=normalizeDataFilterClassText(row?.fund_name);
+ const classText=normalizeDataFilterClassText(row?.class_name);
+ const identityText=normalizeDataFilterClassText(row?.class_identity);
+ let baseFundText=fundText;
+ // Some FMC layouts use the entire Fund Name as a placeholder Class Name
+ // when the document has no separately published class/series. That is not
+ // a real class suffix: preserve the fund identity and treat the class as
+ // unspecified. A distinct canonical class_identity still takes priority.
+ const classIsPlaceholder=Boolean(classText&&fundText&&classText===fundText&&(!identityText||identityText===fundText));
+ // Other layouts include a genuine class/series in Fund Name as well as
+ // storing it separately in Class Name. Strip that duplicate suffix only
+ // when it is a proper trailing match; keep the published class descriptor.
+ if(!classIsPlaceholder&&classText&&fundText.endsWith(classText)){
+  const cut=fundText.length-classText.length;
+  if(cut>0&&/\s$/.test(fundText.slice(0,cut)))baseFundText=fundText.slice(0,cut).trim();
+ }
+ return {
+  baseFundText,
+  baseFund:normalizeDataFilterText(baseFundText),
+  classText:classIsPlaceholder?'':classText,
+  classIsPlaceholder
+ };
+}
+function dataFilterFundNameVariants(baseFundText){
+ const value=String(baseFundText??'').trim();
+ if(!value)return [];
+ const variants=[value];
+ // "Fund" is sometimes omitted from client/Excel lists even though it is
+ // part of the official extracted title. Treat only a terminal standalone
+ // word as optional; preserve all other meaningful occurrences of "fund".
+ if(/\s+fund$/i.test(value))variants.push(value.replace(/\s+fund$/i,'').trim());
+ return [...new Set(variants.filter(Boolean))].sort((a,b)=>b.length-a.length);
+}
+function dataFilterLineMatchesRow(entry,row){
+ const parts=dataFilterRowFundParts(row);
+ const variants=dataFilterFundNameVariants(parts.baseFundText);
+ if(!variants.length)return false;
+ // Use the same class-aware normalization for both sides. Unlike the simpler
+ // fund-name key, this preserves meaningful identifiers such as 75/75 while
+ // still normalizing punctuation and whitespace around fund names.
+ const classInput=normalizeDataFilterClassText(entry.name);
+ // Match the longest exact token-bounded fund-name variant first. This
+ // prefers the full official title when "Fund" is supplied, but also
+ // accepts lists that omit only that final descriptor word.
+ let matchedFund='',matchedIndex=-1;
+ for(const variant of variants){
+  const index=classInput.indexOf(variant);
+  if(index<0)continue;
+  const before=classInput[index-1]||'';
+  const after=classInput[index+variant.length]||'';
+  if((!before||before===' ')&&(!after||after===' ')){
+   matchedFund=variant;matchedIndex=index;break;
+  }
+ }
+ if(!matchedFund)return false;
+ const before=classInput.slice(0,matchedIndex).trim();
+ const after=classInput.slice(matchedIndex+matchedFund.length).trim();
+ const qualifier=[before,after].filter(Boolean).join(' ').trim();
+ // A placeholder class copied from Fund Name is not a real class. A request
+ // with no class may match the ETF; a request specifying a class must not.
+ const availableClass=parts.classIsPlaceholder?'':(row?.class_identity||parts.classText||row?.class_name);
+ // A fund-only request intentionally matches all classes. If a class was
+ // supplied, require an exact canonical class match (Series F != Series F-2).
+ return !qualifier||classQualifierMatches(qualifier,availableClass,row?.class_aliases||[]);
+}
+function rowFmcLabel(doc,row){
+ if(row?.fmc)return row.fmc;
+ if(row?.fmc_key)return engine.REGISTRY.find(p=>p.key===row.fmc_key)?.label||row.fmc_key;
+ const info=(doc?.diagnostics||[]).find(x=>x&&x.fmc_detection?.status==='matched');
+ if(info?.fmc_label)return info.fmc_label;
+ const key=info?.fmc_detection?.fmc_key;
+ return engine.REGISTRY.find(p=>p.key===key)?.label||key||'—';
+}
+function buildDataFilterResults(rawText){
+ return buildDataFilterResultsFromEntries(parseDataFilterEntries(rawText));
+}
+function buildDataFilterResultsFromEntries(entries){
+ const sources=collectFilterDocuments();
+ const allRows=sources.flatMap(source=>(source.doc.results||[]).map((row,rowIndex)=>({
+  ...source,row,rowIndex,fmc:rowFmcLabel(source.doc,row)
+ })));
+ const matchesByKey=new Map(),unmatched=[],matchedLines=[];
+ for(const entry of entries){
+  // Matching is intentionally independent of Lipper ID. A name-only request
+  // is just as valid as one carrying an ID; the ID is attached only for export.
+  const candidates=allRows.filter(item=>dataFilterLineMatchesRow(entry,item.row));
+  if(!candidates.length){unmatched.push(entry);continue;}
+  // Prefer the most specific extracted base fund name when names overlap.
+  const longest=Math.max(...candidates.map(item=>dataFilterRowFundParts(item.row).baseFund.length));
+  const matching=candidates.filter(item=>dataFilterRowFundParts(item.row).baseFund.length===longest);
+  if(!matching.length){unmatched.push(entry);continue;}
+  matchedLines.push(entry);
+  for(const item of matching){
+   const docKey=item.doc.hash||item.sourceName;
+   const rowKey=item.row.row_id||`${item.row.fund_name}|${item.row.class_name}|${item.row.report_date}|${item.rowIndex}`;
+   const key=`${docKey}::${rowKey}`;
+   if(!matchesByKey.has(key))matchesByKey.set(key,{...item,lipperId:entry.lipperId||item.lipperId||''});
+   else if(!matchesByKey.get(key).lipperId&&entry.lipperId)matchesByKey.get(key).lipperId=entry.lipperId;
+  }
+ }
+ return {entries,matches:[...matchesByKey.values()],unmatched,matchedCount:matchedLines.length};
+}
+function updateDataFilterControls(){
+ const open=$('dataFilterOpen'),upload=$('excelFilterOpen'),clear=$('dataFilterClear'),exportButton=$('exportFiltered');
+ if(!open||!clear||!exportButton)return;
+ const available=collectFilterDocuments().length>0;
+ open.disabled=busy||!available;
+ if(upload){upload.disabled=busy||excelFilterBusy||!available;upload.title=available?'Upload Asset ID and Fund Name columns from an Excel workbook':'Add or restore a document to Recent Documents before filtering';}
+ open.title=available?'Paste fund names to display only requested records from Recent Documents':'Add or restore a document to Recent Documents to enable filtering';
+ clear.classList.toggle('hidden',!dataFilterState.active);
+ exportButton.disabled=busy||!dataFilterState.active||!dataFilterState.matches.length;
+ exportButton.title=exportButton.disabled?'Apply a filter with matching results first':'Download only the filtered extraction rows as CSV';
+}
+function renderFilteredResults(){
+ if(!dataFilterState.active)return;
+ const matches=dataFilterState.matches||[],missing=matches.reduce((n,item)=>n+['MER','TER','PTR'].filter(k=>item.row[k]===null||item.row[k]===undefined||item.row[k]==='').length,0);
+ const pageSize=10,totalPages=Math.max(1,Math.ceil(matches.length/pageSize));
+ const page=Math.min(Math.max(0,Number(dataFilterState.page)||0),totalPages-1);
+ dataFilterState.page=page;
+ const startIndex=page*pageSize,pageMatches=matches.slice(startIndex,startIndex+pageSize);
+ $('overview').classList.add('hidden');$('details').classList.add('hidden');$('actions').classList.add('hidden');
+ $('result').innerHTML=`
+  <div class="stats filter-stats">
+   <div class="stat"><b>${dataFilterState.matchedCount}</b><small>Matched entries</small></div>
+   <div class="stat"><b>${matches.length}</b><small>Rows displayed</small></div>
+   <div class="stat"><b>${missing}</b><small>Missing values</small></div>
+   <div class="stat"><b>${dataFilterState.unmatched.length}</b><small>Not found</small></div>
+  </div>
+  <div class="filter-result-note">Showing matching records from Recent Documents only. Documents in saved History must be restored to Recent Documents before they can be matched. Lipper IDs are ignored for matching but retained for Export Filtered when supplied; fund name and optional Class / Series are used.</div>
+  ${matches.length?`
+   <div class="filtered-results-heading">
+    <span>Matched extraction records</span>
+    <div class="filtered-results-pagination" aria-label="Filtered results pagination">
+     <button type="button" data-filter-page="${page-1}" aria-label="Previous page" ${page===0?'disabled':''}>&lt;</button>
+     <span>${page+1} out of ${totalPages}</span>
+     <button type="button" data-filter-page="${page+1}" aria-label="Next page" ${page>=totalPages-1?'disabled':''}>&gt;</button>
+    </div>
+   </div>
+   <div class="scroller"><table class="filtered-results-table" aria-label="Filtered extracted financial ratios"><thead><tr><th>Source PDF</th><th>FMC</th><th>Class / Series and Fund</th><th>MER</th><th title="Total Expense Ratio (TER)">TER</th><th>PTR</th><th>MRFP date</th><th>Action</th></tr></thead><tbody>${pageMatches.map((item,i)=>{const index=startIndex+i;return `<tr id="filteredrow${index}">
+    <td class="small filter-source-file">${html(item.sourceName)}</td><td>${html(item.fmc)}</td>
+    <td>${html(item.row.class_name)}${fundSubline(item.row)}</td>
+    <td class="number">${fmt(item.row.MER)}</td><td class="number">${fmt(item.row.TER)}</td><td class="number">${fmt(item.row.PTR)}</td>
+    <td class="small">${html(displayDate(item.row.report_date))}</td>
+    <td><span class="result-actions"><button class="ghost filtered-locate" data-index="${index}" type="button" title="Locate this row in its source PDF" ${busy||!(item.doc.blob||item.entryId!==null)?'disabled':''}><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 16 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button><button class="ghost filtered-edit" data-index="${index}" type="button" ${busy?'disabled':''}>Edit</button></span></td>
+   </tr>`;}).join('')}</tbody></table></div>`:'<div class="notice">No extracted records matched the supplied fund names and Class / Series.</div>'}
+  ${dataFilterState.unmatched.length?`<details class="filter-unmatched"><summary>Not found (${dataFilterState.unmatched.length})</summary><ul>${dataFilterState.unmatched.map(entry=>`<li>${html(entry.name)}</li>`).join('')}</ul></details>`:''}
+ `;
+ $('result').querySelectorAll('button[data-filter-page]').forEach(button=>button.addEventListener('click',()=>{
+  const next=Number(button.dataset.filterPage);
+  if(Number.isInteger(next)&&next>=0&&next<totalPages){dataFilterState.page=next;renderFilteredResults();}
+ }));
+ $('result').querySelectorAll('button.filtered-locate').forEach(button=>button.addEventListener('click',()=>focusFilteredMatch(dataFilterState.matches[Number(button.dataset.index)]).catch(error)));
+ $('result').querySelectorAll('button.filtered-edit').forEach(button=>button.addEventListener('click',()=>editFilteredMatch(dataFilterState.matches[Number(button.dataset.index)]).catch(error)));
+ updateDataFilterControls();
+}
+function applyDataFilter(rawText){
+ const parsed=buildDataFilterResults(rawText);
+ if(!parsed.entries.length){alert('Paste at least one fund name. Numeric IDs alone are ignored.');return false;}
+ dataFilterState={active:true,source:'paste',rawText,entries:parsed.entries,matches:parsed.matches,unmatched:parsed.unmatched,matchedCount:parsed.matchedCount,page:0};
+ renderFilteredResults();return true;
+}
+async function refreshDataFilterResults(){
+ if(!dataFilterState.active)return;
+ await refreshFilterDocumentCache();
+ const next=dataFilterState.source==='excel'
+  ?buildDataFilterResultsFromEntries(dataFilterState.entries)
+  :buildDataFilterResults(dataFilterState.rawText);
+ dataFilterState={...dataFilterState,entries:next.entries,matches:next.matches,unmatched:next.unmatched,matchedCount:next.matchedCount};
+ renderFilteredResults();
+}
+function resetDataFilter(restoreView=true){
+ dataFilterState={active:false,source:'paste',rawText:'',entries:[],matches:[],unmatched:[],matchedCount:0,page:0};
+ updateDataFilterControls();
+ if(restoreView){
+  if(active)inspectDoc(active);
+  else{$('result').replaceChildren();$('details').replaceChildren();$('actions').classList.add('hidden');$('overview').classList.remove('hidden');}
+ }
+}
+// Excel upload uses the SAME matching path as manual paste. IDs are export-only metadata.
+function entriesFromExcelRows(rows){
+ const byName=new Map(),entries=[];
+ for(const row of rows||[]){
+  // Fund Name is required; Asset ID / Lipper ID is optional metadata only.
+  // Never discard a valid fund row just because its ID cell is blank.
+  const name=String(row.name??'').trim().replace(/\s+/g,' ');
+  const normalized=normalizeDataFilterText(name);
+  if(!name||!normalized)continue;
+  const lipperId=String(row.lipperId??'').trim();
+  const prior=byName.get(normalized);
+  if(prior){if(!prior.lipperId&&lipperId)prior.lipperId=lipperId;continue;}
+  const entry={raw:name,name,normalized,lipperId};
+  byName.set(normalized,entry);entries.push(entry);
+ }
+ return entries;
+}
+function excelImportStatus(message,isError=false){
+ const target=$('excelFilterStatus');
+ if(!target)return;
+ target.textContent=message;target.classList.toggle('error',isError);
+}
+function previewExcelFilterSheet(resetPage=true){
+ const select=$('excelFilterSheet'),preview=$('excelFilterPreview'),apply=$('excelFilterApply');
+ const sheet=excelFilterWorkbook?.sheets?.[Number(select.value)];
+ apply.disabled=true;
+ if(!sheet){preview.innerHTML='';excelFilterPreviewPage=0;return;}
+ const found=sheet.analysis;
+ if(!found.valid){
+  excelImportStatus(found.error,true);
+  preview.innerHTML='<p class="filter-dialog-hint">Select a worksheet containing both Asset ID and Fund Name headers.</p>';
+  excelFilterPreviewPage=0;
+  return;
+ }
+ const pageSize=10,totalPages=Math.max(1,Math.ceil(found.entries.length/pageSize));
+ if(resetPage)excelFilterPreviewPage=0;
+ excelFilterPreviewPage=Math.min(Math.max(0,excelFilterPreviewPage),totalPages-1);
+ const startIndex=excelFilterPreviewPage*pageSize;
+ const sample=found.entries.slice(startIndex,startIndex+pageSize);
+ preview.innerHTML=`
+  <p class="excel-import-section-label">Detected columns</p>
+  <div class="excel-detected-columns"><span class="excel-column-badge">Asset ID · Found</span><span class="excel-column-badge">Fund Name · Found</span></div>
+  <div class="excel-import-stats"><span><b>${found.rowsRead}</b><small>Rows read</small></span><span><b>${found.validRows}</b><small>Valid entries</small></span><span><b>${found.skipped}</b><small>Skipped rows</small></span></div>
+  <div class="excel-preview-heading">
+   <p class="excel-import-section-label">Sample imported entries</p>
+   <div class="excel-preview-pagination" aria-label="Imported entries pagination">
+    <button type="button" data-excel-preview-page="${excelFilterPreviewPage-1}" aria-label="Previous page" ${excelFilterPreviewPage===0?'disabled':''}>&lt;</button>
+    <span>${excelFilterPreviewPage+1} out of ${totalPages}</span>
+    <button type="button" data-excel-preview-page="${excelFilterPreviewPage+1}" aria-label="Next page" ${excelFilterPreviewPage>=totalPages-1?'disabled':''}>&gt;</button>
+   </div>
+  </div>
+  <div class="excel-preview-table-wrap"><table class="excel-filter-table"><thead><tr><th>Asset ID / Lipper ID</th><th>Fund Name</th></tr></thead><tbody>${sample.map(row=>`<tr><td>${html(row.lipperId)}</td><td>${html(row.name)}</td></tr>`).join('')}</tbody></table></div>`;
+ preview.querySelectorAll('[data-excel-preview-page]').forEach(button=>button.addEventListener('click',()=>{
+  const next=Number(button.dataset.excelPreviewPage);
+  if(Number.isInteger(next)&&next>=0&&next<totalPages){excelFilterPreviewPage=next;previewExcelFilterSheet(false);}
+ }));
+ excelImportStatus(`${found.validRows} valid entries detected. Confirm to filter matching records from Recent Documents.`);
+ apply.disabled=!found.validRows||excelFilterBusy;
+}
+async function loadExcelFilterFile(file){
+ if(!file)return;
+ const select=$('excelFilterSheet'),preview=$('excelFilterPreview'),dialog=$('excelFilterDialog');
+ excelFilterWorkbook=null;select.replaceChildren();preview.replaceChildren();
+ $('excelFilterFileName').textContent=`${file.name} · ${/\.csv$/i.test(file.name)?'CSV Data':'Excel Workbook'}`;
+ $('excelFilterSheetRow').classList.add('hidden');
+ $('excelFilterApply').disabled=true;
+ excelFilterBusy=true;updateDataFilterControls();
+ excelImportStatus('Reading file locally…');
+ try{
+  if(!global.MRFP_FILTER_EXCEL)throw Error('Offline Excel reader is missing. Copy js/filter-excel.js into the project.');
+  const book=await global.MRFP_FILTER_EXCEL.readWorkbook(file);
+  excelFilterWorkbook=book;
+  for(let i=0;i<book.sheets.length;i++){
+   const sheet=book.sheets[i];const option=document.createElement('option');
+   option.value=String(i);option.textContent=`${sheet.name}${sheet.analysis.valid?' — columns found':' — columns missing'}`;
+   select.appendChild(option);
+  }
+  const preferred=book.sheets.findIndex(sheet=>sheet.analysis.valid&&sheet.analysis.validRows>0);
+  if(preferred>=0)select.value=String(preferred);
+  if(book.sheets.length>1)$('excelFilterSheetRow').classList.remove('hidden');
+  else select.value='0';
+  await refreshFilterDocumentCache();
+  if(!collectFilterDocuments().length)throw Error('Add or restore at least one document to Recent Documents before filtering.');
+ }catch(err){
+  excelFilterWorkbook=null;$('excelFilterSheetRow').classList.add('hidden');
+  excelImportStatus(err.message||String(err),true);
+ }finally{
+  excelFilterBusy=false;updateDataFilterControls();
+ }
+ if(excelFilterWorkbook)previewExcelFilterSheet();
+ else{preview.innerHTML='';$('excelFilterApply').disabled=true;}
+ if(!dialog.open)dialog.showModal();
+}
+function openExcelFilePicker(){
+ // Must remain synchronous inside the button click so the browser opens its
+ // native file picker immediately, without an intermediate application modal.
+ if(busy||excelFilterBusy)return;
+ const input=$('excelFilterFile');
+ input.value='';
+ input.click();
+}
+function applyExcelFilter(){
+ if(busy||excelFilterBusy||!excelFilterWorkbook)return false;
+ const sheet=excelFilterWorkbook.sheets[Number($('excelFilterSheet').value)];
+ if(!sheet?.analysis?.valid)return false;
+ const entries=entriesFromExcelRows(sheet.analysis.entries);
+ if(!entries.length){excelImportStatus('No valid fund names were found in this worksheet.',true);return false;}
+ const parsed=buildDataFilterResultsFromEntries(entries);
+ dataFilterState={active:true,source:'excel',rawText:'',entries:parsed.entries,matches:parsed.matches,unmatched:parsed.unmatched,matchedCount:parsed.matchedCount,page:0,
+  sourceFile:excelFilterWorkbook.name,sourceSheet:sheet.name};
+ renderFilteredResults();
+ $('excelFilterDialog').close();
+ return true;
+}
+async function activateFilteredSource(item){
+ if(item.entryId!==null&&item.entryId!==undefined){
+  await selectBatchEntry(item.entryId,{awaitViewer:true});
+  return;
+ }
+ if(!item.doc?.blob)throw Error('The original PDF is not available in saved History. Restore or re-upload the source PDF to view its evidence.');
+ currentBatchSelection=null;openedFromHistory=true;
+ active=item.doc;selectedFile=null;$('pdf').value='';
+ $('filename').textContent=item.doc.filename||item.sourceName;
+ inspectDoc(item.doc);updateHistoryReturn();
+ await viewPdf(item.doc.blob);
+}
+async function focusFilteredMatch(item){
+ if(!item)return;
+ await activateFilteredSource(item);
+ await global.MRFP_EVIDENCE_VIEWER.focusRow(item.row);
+}
+async function editFilteredMatch(item){
+ if(!item)return;
+ resetDataFilter(false);
+ await activateFilteredSource(item);
+ beginEdit(item.rowIndex);
+}
+function dataFilterRowDisplayName(row){
+ const fundName=String(row?.fund_name??'').trim();
+ const className=String(row?.class_name??'').trim();
+ if(!className)return fundName;
+ const normalizedFund=normalizeDataFilterClassText(fundName);
+ const normalizedClass=normalizeDataFilterClassText(className);
+ if(!normalizedClass||normalizedFund===normalizedClass)return fundName;
+ // If the extracted Fund Name already contains the exact class suffix,
+ // do not append it a second time in Filtered CSV.
+ if(normalizedFund.endsWith(normalizedClass)){
+  const cut=normalizedFund.length-normalizedClass.length;
+  if(cut>0&&/\s$/.test(normalizedFund.slice(0,cut)))return fundName;
+ }
+ return [fundName,className].filter(Boolean).join(' ');
+}
+function buildFilteredCsvContent(matches){
+ const q=value=>'"'+String(value??'').replace(/"/g,'""')+'"';
+ const headers=['Lipper ID','Fund Name','MER','TER','PTR','MRFP DATE'];
+ const lines=[headers,...matches.map(item=>[
+  item.lipperId||'',
+  dataFilterRowDisplayName(item.row),
+  item.row.MER??'',item.row.TER??'',item.row.PTR??'',item.row.report_date||''
+ ])];
+ return '\ufeff'+lines.map(line=>line.map(q).join(',')).join('\r\n');
+}
+function exportFilteredResults(){
+ if(!dataFilterState.active||!dataFilterState.matches.length)return;
+ const csv=buildFilteredCsvContent(dataFilterState.matches);
+ const date=new Date().toISOString().slice(0,10);
+ download(new Blob([csv],{type:'text/csv;charset=utf-8'}),`MRFP_Filtered_Results_${date}.csv`);
+}
+function clearDisplayedDocument(){
+ resetDataFilter(false);
+ selectedFile=null;active=null;stagedRescan=null;
+ updateRecentListControls();$('pdf').value='';
+ $('filename').textContent='No PDF selected';viewPdf(null);
+ $('result').replaceChildren();$('details').replaceChildren();
+ $('download').classList.add('hidden');$('actions').classList.add('hidden');
+ $('rescanPanel').classList.add('hidden');$('overview').classList.remove('hidden');
+}
+
+function bindSettings(){
+ const settings=$('settingsDialog'),confirmBox=$('confirmDialog');
+ let action=null;
+ $('settingsOpen').onclick=()=>{if(!busy)settings.showModal();};
+ $('settingsClose').onclick=()=>settings.close();
+ $('confirmClose').onclick=()=>confirmBox.close();
+ $('confirmCancel').onclick=()=>confirmBox.close();
+ settings.addEventListener('click',e=>{if(e.target===settings)settings.close();});
+ confirmBox.addEventListener('click',e=>{if(e.target===confirmBox)confirmBox.close();});
+ function ask(which){
+  if(busy)return;
+  action=which;
+  $('confirmTitle').textContent=which==='pdfs'?'Clear Stored PDFs?':'Reset ALL Saved Data?';
+  $('confirmMessage').textContent=which==='pdfs'
+   ?'This removes the PDF copies stored in this browser. Your extraction results, history, edits and verification will remain. PDF preview and re-scanning will require re-uploading the originals. Continue?'
+   :'This permanently deletes ALL saved PDFs, extraction results, history, edits and verification records in this browser. This cannot be undone. Your source files on your computer are not affected. Continue?';
+  $('confirmProceed').textContent=which==='pdfs'?'Yes, Clear Stored PDFs':'Yes, Reset All Saved Data';
+  $('confirmProceed').className=which==='pdfs'?'secondary':'danger-button';
+  confirmBox.showModal();
+ }
+ $('settingsClearPdfs').onclick=()=>ask('pdfs');
+ $('settingsResetAll').onclick=()=>ask('all');
+ $('confirmProceed').onclick=async()=>{
+  if(busy||!action)return;
+  const requested=action;action=null;
+  $('confirmProceed').disabled=true;
+  try{
+   if(requested==='pdfs'){
+    const count=await store.clearStoredPDFs();
+    // Avoid an in-memory object URL keeping a deleted PDF available.
+    selectedFile=null;$('pdf').value='';viewPdf(null);batchEntries=[];currentBatchSelection=null;updateBatchDisplay();
+    if(active){const saved=await store.get(active.hash);if(saved)inspectDoc(saved);}
+    await history();updateHistoryReturn();
+    status(`Removed ${count} stored PDF ${count===1?'copy':'copies'}; results and history kept`,0);
+   }else{
+    const count=await store.resetAllSavedData();
+    clearDisplayedDocument();batchEntries=[];currentBatchSelection=null;updateBatchDisplay();await history();
+    status(`Reset complete — ${count} saved ${count===1?'document':'documents'} deleted`,0);
+   }
+   confirmBox.close();settings.close();
+  }catch(e){error(e);alert('Nothing was intentionally reset after this storage error. '+(e?.message||e));}
+  finally{$('confirmProceed').disabled=false;}
+ };
+}
+
+function confirmClearList() {
+  const modal = $('clearListModal');
+
+  if (modal.open) return Promise.resolve(false);
+
+  return new Promise(resolve => {
+    let approved = false;
+
+    modal.onclose = () => resolve(approved);
+
+    $('clearListProceed').onclick = () => {
+      approved = true;
+      modal.close();
+    };
+
+    $('clearListCancel').onclick = () => modal.close();
+    $('clearListClose').onclick = () => modal.close();
+
+    modal.onclick = event => {
+      if (event.target === modal) modal.close();
+    };
+
+    modal.showModal();
+    $('clearListCancel').focus();
+  });
+}
+
+function confirmRemoveFromList(doc){
+ const modal=$('removeFromListModal');
+ if(modal.open)return Promise.resolve(false);
+ $('removeFromListFund').textContent=docFundName(doc);
+ $('removeFromListFile').textContent=doc.filename||'Unknown PDF';
+ return new Promise(resolve=>{
+  let approved=false;
+  modal.onclose=()=>resolve(approved);
+  $('removeFromListProceed').onclick=()=>{approved=true;modal.close();};
+  $('removeFromListCancel').onclick=()=>modal.close();
+  $('removeFromListClose').onclick=()=>modal.close();
+  modal.onclick=event=>{if(event.target===modal)modal.close();};
+  modal.showModal();
+  $('removeFromListCancel').focus();
+ });
+}
+async function removeSelectedFromRecentList(){
+ if(busy||!active?.hash)return;
+ const hash=active.hash;
+ const listed=await store.listed();
+ const doc=listed.find(item=>item.hash===hash);
+ if(!doc){recentListedHashes.delete(hash);updateRecentListControls();return;}
+ if(!await confirmRemoveFromList(doc))return;
+ const removed=await store.removeFromWorkspace(hash);
+ if(!removed)return;
+ recentListedHashes.delete(hash);
+ await history();
+ if(dataFilterState.active)await refreshDataFilterResults();
+ status(`Removed ${docFundName(doc)} from Recent Documents. Saved History and the original PDF were kept.`,0);
+}
+
+// v4 UI orchestration: independent of the v3.1 PDF reader, FMC engine and Excel writer.
+const MAX_BATCH=10;
+let batchEntries=[],batchSerial=0,currentBatchSelection=null,openedFromHistory=false;
+let pageName='extract',historyPageIndex=0,reportDocs=[];
+let prefs=(()=>{try{return {...{theme:'light',landing:'extract',ocr:true},...JSON.parse(localStorage.getItem('mrfp_v4_preferences')||'{}')};}catch{return {theme:'light',landing:'extract',ocr:true};}})();
+function savePrefs(){try{localStorage.setItem('mrfp_v4_preferences',JSON.stringify(prefs));}catch(e){notices('Settings could not be persisted in this browser: '+e.message);}}
+function applyTheme(){document.documentElement.dataset.theme=prefs.theme==='dark'?'dark':prefs.theme==='system'&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}
+function setPage(page){
+ if(!['extract','history','reports','settings'].includes(page))page='extract';
+ pageName=page;
+ for(const name of ['extract','history','reports','settings']){
+  $(name+'Page').classList.toggle('hidden',name!==page);
+  const btn=document.querySelector('[data-page="'+name+'"]');
+  btn.classList.toggle('is-active',name===page);
+  if(name===page)btn.setAttribute('aria-current','page');else btn.removeAttribute('aria-current');
+ }
+ if(page==='history')renderHistoryPage().catch(error);
+ if(page==='reports')renderReports().catch(error);
+ if(page==='settings')renderStorageInfo().catch(error);
+}
+function updateBatchDisplay(){
+ $('batchCount').textContent=`${batchEntries.length} / ${MAX_BATCH} files selected`;
+ $('newBatch').disabled=busy||!batchEntries.length;
+ $('batchList').innerHTML=batchEntries.map(entry=>{
+  const state=entry.state==='partial'?'Completed · missing values':entry.state.charAt(0).toUpperCase()+entry.state.slice(1);
+  const selected=currentBatchSelection===entry.id;
+  return `<div class="batch-document ${selected?'selected':''}" data-entry="${entry.id}">
+   <button type="button" class="batch-open" data-entry="${entry.id}" ${busy?'disabled':''} title="Review this document"><span class="batch-icon">PDF</span><span class="batch-file"><b>${html(entry.file.name)}</b><small>${html(entry.message||state)}</small></span></button>
+   <span class="batch-status ${html(entry.state)}">${html(state)}</span>
+   ${entry.state==='failed'?`<button class="ghost batch-retry" data-entry="${entry.id}" ${busy?'disabled':''}>Retry</button>`:''}
+   <button class="batch-remove ghost" aria-label="Remove ${html(entry.file.name)}" data-entry="${entry.id}" title="Remove from queue" ${busy?'disabled':''}>×</button>
+  </div>`;
+ }).join('')||'<span class="muted">Choose PDF files to prepare a batch.</span>';
+ $('batchList').querySelectorAll('.batch-open').forEach(el=>el.onclick=()=>selectBatchEntry(Number(el.dataset.entry)).catch(error));
+ $('batchList').querySelectorAll('.batch-remove').forEach(el=>el.onclick=()=>removeBatchEntry(Number(el.dataset.entry)));
+ $('batchList').querySelectorAll('.batch-retry').forEach(el=>el.onclick=()=>retryBatchEntry(Number(el.dataset.entry)));
+ const completed=batchEntries.filter(e=>e.state==='completed'||e.state==='partial'),failed=batchEntries.filter(e=>e.state==='failed');
+ let classes=0,mer=0,ter=0,ptr=0,missing=0;
+ for(const entry of completed){const rows=entry.snapshot?.results||[];classes+=rows.length;
+  for(const row of rows)for(const key of ['MER','TER','PTR']){
+   if(row[key]===null||row[key]===undefined||row[key]==='')missing++;
+   else if(key==='MER')mer++;else if(key==='TER')ter++;else ptr++;
+  }
+ }
+ const hasSummary=completed.length||failed.length;
+ $('batchSummary').classList.toggle('hidden',!hasSummary);
+ $('batchSummary').innerHTML=hasSummary?[
+  [completed.length,'PDFs completed'],[classes,'Classes / series'],[mer,'MER values'],[ter,'TER values'],[ptr,'PTR values'],[missing,'Missing values'],[failed.length,'Failed']
+ ].map(([n,label])=>`<div class="batch-stat"><b>${n}</b><small>${label}</small></div>`).join(''):'';
+ updateDataFilterControls();
+}
+function validPDF(file){return file&&/\.pdf$/i.test(file.name)&&(!file.type||file.type==='application/pdf'||file.type==='application/x-pdf');}
+function addBatchFiles(files){
+ if(busy)return;
+ let invalid=0,duplicate=0,overflow=0,added=[];
+ for(const file of [...files]){
+  if(!validPDF(file)){invalid++;continue;}
+  if(batchEntries.some(e=>e.file.name===file.name&&e.file.size===file.size&&e.file.lastModified===file.lastModified)){duplicate++;continue;}
+  if(batchEntries.length>=MAX_BATCH){overflow++;continue;}
+  const entry={id:++batchSerial,file,state:'queued',message:'Queued for extraction',hash:null,snapshot:null,error:null};
+  batchEntries.push(entry);added.push(entry);
+ }
+ if(added.length && currentBatchSelection===null)selectBatchEntry(added[0].id).catch(error);
+ updateBatchDisplay();
+ const messages=[];
+ if(invalid)messages.push(`${invalid} invalid/non-PDF file(s) skipped`);
+ if(duplicate)messages.push(`${duplicate} duplicate selection(s) skipped`);
+ if(overflow)messages.push(`${overflow} file(s) skipped: ${MAX_BATCH}-PDF maximum`);
+ if(messages.length)notices(messages.join(' · '));
+ else if(added.length)notices(`Ready: ${batchEntries.length} of ${MAX_BATCH} PDFs. Click Extract selected PDFs.`,true);
+ $('pdf').value='';
+}
+async function selectBatchEntry(id,{awaitViewer=false}={}){
+ if(busy)return;
+ const entry=batchEntries.find(e=>e.id===id);if(!entry)return;
+ currentBatchSelection=id;openedFromHistory=false;updateHistoryReturn();
+ selectedFile=entry.file;stagedRescan=null;$('rescanPanel').classList.add('hidden');
+ $('filename').textContent=entry.file.name;
+ if(entry.hash&&(entry.state==='completed'||entry.state==='partial')){
+  const doc=await store.get(entry.hash);
+  if(doc){entry.snapshot=doc;inspectDoc(doc);if(!doc.blob){$('result').querySelectorAll('button.locate').forEach(b=>b.disabled=false);}const viewerPromise=viewPdf(doc.blob||entry.file);if(awaitViewer)await viewerPromise;status('Showing '+entry.file.name);updateBatchDisplay();return;}
+ }
+ active=null;$('result').replaceChildren();$('details').replaceChildren();
+ $('download').classList.add('hidden');$('actions').classList.add('hidden');$('overview').classList.remove('hidden');
+ $('overview').innerHTML=`<div class="emptyIcon">▤</div><b>${html(entry.file.name)}</b><br><small>${html(entry.error||entry.message||'Not yet processed')}</small>`;
+ const viewerPromise=viewPdf(entry.file);if(awaitViewer)await viewerPromise;status('Selected: '+entry.file.name,0);
+ if(dataFilterState.active)renderFilteredResults();
+ updateBatchDisplay();
+}
+function removeBatchEntry(id){
+ if(busy)return;
+ batchEntries=batchEntries.filter(e=>e.id!==id);
+ if(currentBatchSelection===id){currentBatchSelection=null;
+  clearDisplayedDocument();
+  if(batchEntries.length)selectBatchEntry(batchEntries[0].id).catch(error);
+ }
+ updateBatchDisplay();
+ if(dataFilterState.active)refreshDataFilterResults().catch(error);
+}
+function clearBatch(){
+ if(busy)return;batchEntries=[];currentBatchSelection=null;openedFromHistory=false;updateHistoryReturn();
+ clearDisplayedDocument();$('overview').innerHTML='<div class="emptyIcon">▤</div>Choose one to five MRFP PDFs to begin.<br><small>Existing saved history remains unchanged.</small>';
+ updateBatchDisplay();refreshFilterDocumentCache().catch(error);status('Batch cleared — saved history kept',0);
+}
+async function extractAndSave(file){
+ if(!validPDF(file))throw Error('Only PDF documents are supported');
+ const signature=new Uint8Array(await file.slice(0,8).arrayBuffer());
+ if(String.fromCharCode(...signature.slice(0,5))!=='%PDF-')throw Error('Invalid PDF header — file is not a valid PDF document');
+ const hash=await store.fingerprint(file);
+ let doc=await store.get(hash);
+ if(!doc){
+  const analysis=await runAnalysis(file);
+  doc={hash,filename:file.name,blob:file,results:analysis.results,diagnostics:analysis.diagnostics,notes:analysis.notes,evidenceMap:analysis.evidenceMap,verified:false,has_corrections:false,source:'PDF.js native / optional OCR',terDefinition:'total-expense-ratio-v1',created:Date.now()};
+  await store.put(doc);
+ }else if(!(doc.results||[]).length&&!doc.has_corrections&&!doc.verified){
+  const analysis=await runAnalysis(file);
+  if(analysis.results.length){doc.results=analysis.results;doc.diagnostics=analysis.diagnostics;doc.notes=analysis.notes;doc.evidenceMap=analysis.evidenceMap;doc.source='PDF.js native / optional OCR';doc.blob=file;doc.terDefinition='total-expense-ratio-v1';await store.put(doc);}
+  else if(!doc.blob){doc.blob=file;await store.put(doc);}
+ }else if(!doc.blob){doc.blob=file;await store.put(doc);}
+ await store.addToWorkspace(hash);
+ return doc;
+}
+async function processOne(entry,idx,total){
+ entry.state='processing';entry.error=null;entry.message=`Document ${idx} of ${total} · Reading PDF`;
+ status(`Processing ${idx}/${total}: ${entry.file.name}`);updateBatchDisplay();
+ try{
+  const doc=await extractAndSave(entry.file);
+  entry.hash=doc.hash;entry.snapshot=doc;
+  const missing=(doc.results||[]).some(r=>['MER','TER','PTR'].some(k=>r[k]===null||r[k]===undefined));
+  entry.state=missing||!(doc.results||[]).length?'partial':'completed';
+  entry.message=doc.results?.length?`${doc.results.length} classes · ${doc.verified?'Previously verified':'Review pending'}`:'No confident ratio rows · review needed';
+  if(currentBatchSelection===entry.id){active=doc;inspectDoc(doc);if(!doc.blob){$('result').querySelectorAll('button.locate').forEach(b=>b.disabled=false);}viewPdf(doc.blob||entry.file);}
+ }catch(e){entry.state='failed';entry.error=e.message||String(e);entry.message=entry.error;console.error('Batch document failed',entry.file.name,e);}
+ updateBatchDisplay();
+ if(dataFilterState.active)await refreshDataFilterResults();
+ else await refreshFilterDocumentCache();
+}
+async function processBatch(){
+ if(busy)return;
+ const queue=batchEntries.filter(e=>e.state==='queued');
+ if(!queue.length){notices(batchEntries.length?'No queued PDFs. Failed files have individual Retry controls.':'Select at least one PDF first.');return;}
+ setBusy(true);const total=queue.length;
+ try{
+  for(let i=0;i<queue.length;i++){
+   await processOne(queue[i],i+1,total);
+   status(`Finished ${i+1}/${total} queued PDFs`,Math.round((i+1)/total*100));
+  }
+  const failed=queue.filter(e=>e.state==='failed').length;
+  notices(`${total-failed} of ${total} scanned or loaded · ${failed} failed · extraction completion does not mean verified.`,failed===0);
+  await history();
+ }catch(e){error(e);}finally{setBusy(false);updateBatchDisplay();}
+}
+async function retryBatchEntry(id){
+ if(busy)return;const entry=batchEntries.find(e=>e.id===id);if(!entry||entry.state!=='failed')return;
+ setBusy(true);
+ try{await processOne(entry,1,1);await history();status(entry.state==='failed'?'Retry failed: '+entry.error:'Retry complete',100);}
+ finally{setBusy(false);updateBatchDisplay();}
+}
+function updateHistoryReturn(){
+ $('historyReturn').classList.toggle('hidden',!openedFromHistory);
+ if(openedFromHistory){$('historyStatus').textContent='Loaded from history: '+(active?.results?.[0]?.fund_name||active?.filename||'Saved document')+' · '+(active?.blob?'Original PDF available':'History loaded — original PDF not available.');}
+ updateDataFilterControls();
+}
+function dateLabel(d){return new Date(d.created||d.updated||0).toLocaleString();}
+function docFundName(d){return [...new Set((d.results||[]).map(r=>r.fund_name).filter(Boolean))].join(' · ')||d.filename||'Unnamed document';}
+function docMRFPDate(d){return [...new Set((d.results||[]).map(r=>r.report_date).filter(Boolean))].map(displayDate).join(', ')||'—';}
+function withinPeriod(doc,period){
+ if(period==='all')return true;
+ const when=doc.updated||doc.created||0,now=Date.now();
+ if(period==='month'){const a=new Date(when),b=new Date(now);return a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth();}
+ return when>=now-Number(period)*86400000;
+}
+async function renderHistoryPage(){
+ const listedHashes=new Set(await store.workspace());
+ const docs=(await store.all()).filter(d=>withinPeriod(d,$('historyPeriod').value)).sort((a,b)=>(b.created||b.updated||0)-(a.created||a.updated||0));
+ const term=$('historySearch').value.trim().toLowerCase();
+ const filtered=docs.filter(d=>[d.filename,docFundName(d)].some(s=>String(s||'').toLowerCase().includes(term)));
+ const limit=Number($('historyPageSize').value)||10,pages=Math.max(1,Math.ceil(filtered.length/limit));
+ historyPageIndex=Math.max(0,Math.min(historyPageIndex,pages-1));
+ const visible=filtered.slice(historyPageIndex*limit,(historyPageIndex+1)*limit);
+ $('historyRows').innerHTML=visible.map(d=>`<tr><td class="small">${html(dateLabel(d))}</td><td><b>${html(docFundName(d))}</b><small class="row-file">${html(d.filename)}</small></td><td>${(d.results||[]).length}</td><td>${html(docMRFPDate(d))}</td><td><span class="verification-pill ${d.verified?'verified':'unverified'}">${d.verified?'✓ Verified':'Unverified'}</span></td><td class="history-actions"><button class="ghost view-saved" data-hash="${html(d.hash)}" type="button">View</button><button class="ghost restore-saved" data-hash="${html(d.hash)}" ${listedHashes.has(d.hash)?'disabled title="Already in Recent Documents"':''} type="button">${listedHashes.has(d.hash)?'In List':'Restore'}</button><button class="ghost rescan-saved" data-hash="${html(d.hash)}" ${d.blob?'':'disabled title="Original PDF unavailable"'} type="button">Re-scan</button><button class="ghost delete-saved" data-hash="${html(d.hash)}" type="button">Delete</button></td></tr>`).join('')||'<tr><td colspan="6" class="empty-results">No matching saved documents.</td></tr>';
+ $('historyTotal').textContent=`${filtered.length} saved record${filtered.length===1?'':'s'}`;
+ $('historyPageNumber').textContent=`${historyPageIndex+1} of ${pages}`;
+ $('historyPrevious').disabled=historyPageIndex===0;$('historyNext').disabled=historyPageIndex>=pages-1;
+ $('historyRows').querySelectorAll('.view-saved').forEach(b=>b.onclick=()=>openFromHistory(b.dataset.hash,false).catch(error));
+ $('historyRows').querySelectorAll('.restore-saved').forEach(b=>b.onclick=()=>restoreFromHistory(b.dataset.hash).catch(error));
+ $('historyRows').querySelectorAll('.rescan-saved').forEach(b=>b.onclick=()=>openFromHistory(b.dataset.hash,true).catch(error));
+ $('historyRows').querySelectorAll('.delete-saved').forEach(b=>b.onclick=()=>deleteHistory(b.dataset.hash).catch(error));
+}
+async function restoreFromHistory(hash){
+ if(busy)return;
+ const doc=await store.get(hash);if(!doc)throw Error('The saved document could not be found.');
+ await store.addToWorkspace(hash);
+ await history();
+ status(`Restored to Recent Documents: ${docFundName(doc)}`,0);
+}
+async function openFromHistory(hash,retry){
+ if(busy)return;
+ await loadSaved(hash);
+ currentBatchSelection=null;updateBatchDisplay();openedFromHistory=true;updateHistoryReturn();setPage('extract');
+ if(retry)await rescan();
+}
+async function deleteHistory(hash){
+ if(busy)return;const doc=await store.get(hash);if(!doc)return;
+ if(!confirm(`Delete saved history for "${docFundName(doc)}"? This permanently removes its extraction and stored PDF. Other records are not affected.`))return;
+ await store.remove(hash);
+ for(const e of batchEntries)if(e.hash===hash){e.state='queued';e.hash=null;e.snapshot=null;e.message='Saved copy deleted · re-extract to save again';}
+ if(active?.hash===hash)clearDisplayedDocument();
+ await history();updateBatchDisplay();status('Saved record deleted',0);
+}
+function getValueCount(rows,key){return rows.reduce((n,r)=>n+(r[key]!==null&&r[key]!==undefined&&r[key]!==''?1:0),0);}
+function ratioBar(label,value,total){const width=total?Math.round(value/total*100):0;return `<div class="bar-line"><span>${html(label)}</span><div class="bar-track"><i style="width:${width}%"></i></div><b>${value}</b></div>`;}
+async function renderReports(){
+ reportDocs=(await store.all()).filter(d=>withinPeriod(d,$('reportPeriod').value));
+ const docs=reportDocs,rows=docs.flatMap(d=>d.results||[]);
+ const fundNames=new Set(rows.map(r=>r.fund_name).filter(Boolean));
+ let mer=getValueCount(rows,'MER'),ter=getValueCount(rows,'TER'),ptr=getValueCount(rows,'PTR');
+ const missing=rows.length*3-mer-ter-ptr;
+ const verified=docs.filter(d=>d.verified).length;
+ $('reportStats').innerHTML=[
+  [docs.length,'Saved documents'],[fundNames.size,'Unique fund names'],[rows.length,'Classes / series'],[`${mer}/${rows.length}`,'MER populated'],[`${ter}/${rows.length}`,'TER populated'],[`${ptr}/${rows.length}`,'PTR populated'],[missing,'Missing ratio cells'],[`${verified} / ${docs.length}`,'User-verified documents']
+ ].map(([n,label])=>`<div class="report-stat"><b>${n}</b><small>${label}</small></div>`).join('');
+ const funds=new Map();for(const r of rows){const name=r.fund_name||'Fund name missing';funds.set(name,(funds.get(name)||0)+1);}
+ const sorted=[...funds].sort((a,b)=>b[1]-a[1]);const max=Math.max(0,...sorted.map(x=>x[1]));
+ $('reportFundBars').innerHTML=sorted.length?sorted.slice(0,14).map(([name,n])=>ratioBar(name,n,max)).join(''):'<p class="muted">No saved classes in this period.</p>';
+ $('reportVerifyBars').innerHTML=ratioBar('User-verified',verified,docs.length)+ratioBar('Unverified',docs.length-verified,docs.length)+ratioBar('Documents with missing ratios',docs.filter(d=>(d.results||[]).some(r=>['MER','TER','PTR'].some(k=>r[k]===null||r[k]===undefined))).length,docs.length);
+ $('reportRows').innerHTML=docs.map(d=>{
+  const r=d.results||[],m=getValueCount(r,'MER'),t=getValueCount(r,'TER'),p=getValueCount(r,'PTR');
+  return `<tr><td>${html(docFundName(d))}<small class="row-file">${html(d.filename)}</small></td><td>${r.length}</td><td>${m}/${r.length}</td><td>${t}/${r.length}</td><td>${p}/${r.length}</td><td>${3*r.length-m-t-p}</td><td>${d.verified?'Verified':'Unverified'}</td></tr>`;
+ }).join('')||'<tr><td colspan="7">No stored reports in selected period.</td></tr>';
+}
+function exportReport(){
+ const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+ const lines=[['Fund name','Filename','Classes','MER populated','TER populated','PTR populated','Missing ratio cells','Verification']];
+ for(const d of reportDocs){const r=d.results||[],m=getValueCount(r,'MER'),t=getValueCount(r,'TER'),p=getValueCount(r,'PTR');lines.push([docFundName(d),d.filename,r.length,m,t,p,3*r.length-m-t-p,d.verified?'Verified':'Unverified']);}
+ download(new Blob(['\ufeff'+lines.map(line=>line.map(q).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}),'MRFP_v5_Report.csv');
+}
+async function renderStorageInfo(){
+ const docs=await store.all(),pdfs=docs.filter(d=>d.blob).length;
+ $('storageOverview').textContent=`${docs.length} saved documents · ${pdfs} original PDF copies · ${docs.length-pdfs} without original PDFs · ${store.isTemporary()?'Temporary (storage blocked; data may disappear on refresh)':'IndexedDB persistent storage'}.`;
+}
+function showSettingTab(name){
+ document.querySelectorAll('.setting-tab').forEach(b=>b.classList.toggle('is-active',b.dataset.setting===name));
+ for(const key of ['general','extraction','storage','about'])$('settings'+key[0].toUpperCase()+key.slice(1)).classList.toggle('hidden',key!==name);
+ if(name==='storage')renderStorageInfo().catch(error);
+}
+async function backupHistory(){
+ const docs=(await store.all()).map(store.slim);
+ download(new Blob([JSON.stringify({schema:'MRFP-v4-results-backup',version:1,exportedAt:new Date().toISOString(),notice:'Original PDF files are not included.',docs},null,2)],{type:'application/json'}),`MRFP_History_Backup_${new Date().toISOString().slice(0,10)}.json`);
+ status(`History backup exported (${docs.length} records; PDFs not included)`);
+}
+async function importHistory(file){
+ if(!file)return;
+ if(file.size>100*1024*1024)throw Error('Backup too large (100 MB maximum).');
+ const data=JSON.parse(await file.text());
+ if(data.schema!=='MRFP-v4-results-backup'||data.version!==1||!Array.isArray(data.docs))throw Error('Not a supported MRFP results backup.');
+ if(!confirm(`Import ${data.docs.length} history records? Existing saved records will NOT be overwritten. Original PDFs are not included.`))return;
+ let added=0,skipped=0;
+ for(const item of data.docs){
+  if(!item||typeof item.hash!=='string'||item.hash.length>200||!Array.isArray(item.results)||typeof item.filename!=='string'){skipped++;continue;}
+  if(await store.get(item.hash)){skipped++;continue;}
+  const safe={...item,blob:null};delete safe.blob;
+  await store.importDoc(safe);added++;
+ }
+ await history();await renderStorageInfo();status(`Imported ${added} new records; skipped ${skipped}`,0);
+}
+function bindV4(){
+ document.querySelectorAll('.nav-btn').forEach(btn=>btn.onclick=()=>{if(!busy)setPage(btn.dataset.page);});
+ $('pdf').addEventListener('change',e=>addBatchFiles(e.target.files||[]));
+ $('extract').onclick=processBatch;
+ $('newBatch').onclick=clearBatch;
+ const bar=$('uploadZone');
+ bar.addEventListener('dragover',e=>{e.preventDefault();bar.classList.add('dragging');});
+ bar.addEventListener('dragleave',()=>bar.classList.remove('dragging'));
+ bar.addEventListener('drop',e=>{e.preventDefault();bar.classList.remove('dragging');if(!busy)addBatchFiles(e.dataTransfer.files);});
+ $('backToHistory').onclick=()=>{openedFromHistory=false;updateHistoryReturn();setPage('history');};
+ for(const id of ['historySearch','historyPeriod','historyPageSize']){
+  $(id).addEventListener(id==='historySearch'?'input':'change',()=>{historyPageIndex=0;renderHistoryPage().catch(error);});
+ }
+ $('historyPrevious').onclick=()=>{historyPageIndex--;renderHistoryPage().catch(error);};
+ $('historyNext').onclick=()=>{historyPageIndex++;renderHistoryPage().catch(error);};
+ $('historyRefresh').onclick=()=>renderHistoryPage().catch(error);
+ $('reportPeriod').onchange=()=>renderReports().catch(error);
+ $('reportExport').onclick=exportReport;
+ for(const b of document.querySelectorAll('.setting-tab'))b.onclick=()=>showSettingTab(b.dataset.setting);
+ $('prefTheme').value=prefs.theme;$('prefLanding').value=prefs.landing;$('prefOCR').checked=prefs.ocr!==false;
+ $('prefTheme').onchange=e=>{prefs.theme=e.target.value;savePrefs();applyTheme();};
+ $('prefLanding').onchange=e=>{prefs.landing=e.target.value;savePrefs();};
+ $('prefOCR').onchange=e=>{prefs.ocr=e.target.checked;savePrefs();};
+ $('backupHistory').onclick=()=>backupHistory().catch(error);
+ $('importHistory').onchange=e=>{const f=e.target.files?.[0];if(f)importHistory(f).catch(err=>{error(err);alert(err.message);});e.target.value='';};
+ $('openLegacySettings').onclick=()=>{if(!busy)$('settingsDialog').showModal();};
+ applyTheme();updateBatchDisplay();setPage(prefs.landing);
+}
+
+function bind(){
+ bindSettings();bindV4();
+ $('extractText').onclick=scanPasted;
+ $('verify').onclick=async()=>{
+  if(!active||busy)return;
+  if(!(active.results||[]).length){alert('No results to verify.');return;}
+  if(!confirm('Mark all extracted results as verified? Please check the original PDF first.'))return;
+  const d=structuredClone(active);d.verified=true;await store.put(d);inspectDoc(d);await history();updateHistoryReturn();status('Marked verified',100);
+ };
+ $('rescan').onclick=rescan;
+ $('rescanCancel').onclick=()=>{stagedRescan=null;$('rescanPanel').classList.add('hidden');status('Re-scan canceled',100);};
+ $('rescanConfirm').onclick=()=>confirmRescan().catch(error);
+ $('reloadHistory').onclick=()=>history().catch(error);
+ $('clearList').onclick=async()=>{
+  if(busy||!await confirmClearList())return;
+  await store.clearWorkspace();
+  await history();
+  if(dataFilterState.active)await refreshDataFilterResults();
+  status('Recent Documents cleared — upload batch and saved History kept',0);
+ };
+ $('removeFromList').onclick=()=>removeSelectedFromRecentList().catch(error);
+ $('viewAllHistory').onclick=()=>{if(!busy)setPage('history');};
+ for(const [id,scope] of [['download','current'],['exportAll','all'],['exportListed','listed']]){
+  $(id).onclick=e=>{e.preventDefault();exportDocs(scope,'xlsx');};
+ }
+ $('excelFilterOpen').onclick=()=>openExcelFilePicker();
+ $('excelFilterFile').onchange=event=>{
+  const file=event.target.files?.[0];
+  if(file)loadExcelFilterFile(file).catch(error);
+ };
+ $('excelFilterSheet').onchange=previewExcelFilterSheet;
+ $('excelFilterApply').onclick=applyExcelFilter;
+ $('excelFilterClose').onclick=()=>$('excelFilterDialog').close();
+ $('excelFilterCancel').onclick=()=>$('excelFilterDialog').close();
+ $('excelFilterDialog').addEventListener('click',event=>{if(event.target===$('excelFilterDialog'))$('excelFilterDialog').close();});
+ $('dataFilterOpen').onclick=async()=>{
+  try{
+   await refreshFilterDocumentCache();updateDataFilterControls();
+   if(!collectFilterDocuments().length){alert('Add or restore at least one document to Recent Documents before filtering.');return;}
+   $('dataFilterInput').value=dataFilterState.rawText||'';
+   $('dataFilterDialog').showModal();
+   $('dataFilterInput').focus();
+  }catch(e){error(e);}
+ };
+ $('dataFilterClose').onclick=()=>$('dataFilterDialog').close();
+ $('dataFilterCancel').onclick=()=>$('dataFilterDialog').close();
+ $('dataFilterClearInput').onclick=()=>{$('dataFilterInput').value='';$('dataFilterInput').focus();};
+ $('dataFilterApply').onclick=()=>{
+  if(applyDataFilter($('dataFilterInput').value))$('dataFilterDialog').close();
+ };
+ $('dataFilterClear').onclick=()=>resetDataFilter(true);
+ $('exportFiltered').onclick=exportFilteredResults;
+ $('dataFilterDialog').addEventListener('click',event=>{if(event.target===$('dataFilterDialog'))$('dataFilterDialog').close();});
+ $('dataFilterInput').addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter')$('dataFilterApply').click();});
+ updateDataFilterControls();
+ const csvBtn=document.createElement('button');csvBtn.textContent='Export CSV';csvBtn.className='ghost';
+ csvBtn.title='Export all saved results as CSV (single worksheet alternative)';
+ csvBtn.onclick=()=>exportDocs('all','csv');
+ $('actions').appendChild(csvBtn);
+ const toggle=document.createElement('button');toggle.textContent='Paste PDF text';toggle.className='ghost';
+ toggle.onclick=()=>$('fallback').classList.toggle('hidden');
+ document.querySelector('.toolbar').appendChild(toggle);
+
+}
+async function startup(){
+ bind();try{await store.db();await history();status(store.isTemporary()?'Ready — temporary history only':'Ready',0);}
+ catch(e){error(Error('Browser storage unavailable: '+e.message+'. Use Chrome or Edge with IndexedDB enabled.'));}
+ // PDF.js may still be loading asynchronously; do not block user interface.
+ reader.ensurePdf().then(()=>notices('PDF.js ready — processing is local to this browser.',true))
+ .catch(()=>{notices('Bundled PDF.js could not load. Paste-text fallback available.');$('fallback').classList.remove('hidden');});
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',startup);else startup();
+})(globalThis);
