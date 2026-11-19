@@ -120,8 +120,6 @@ scotia.js           sei.js            sun_life.js          td.js
 three_iq.js         vanguard.js
 ```
 
-The `ADAPTER_TEMPLATE.txt` file is not a registered FMC. The application has **50 active FMC adapters**, not 51.
-
 ## 5. Saved data, review, and exports
 
 - **History / Restore:** Stored data and source PDF copies use the existing browser storage behavior. Do not clear browser data or discard the source folder until important records have been reviewed and backed up.
