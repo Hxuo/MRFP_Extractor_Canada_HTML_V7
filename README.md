@@ -80,7 +80,7 @@ MRFP_Extractor_Canada_HTML_v7_Ready/
 │   └── fmc-manifest.json
 ├── js/
 │   ├── core/                    7 shared JavaScript source modules
-│   ├── fmc/                     50 FMC adapters + ADAPTER_TEMPLATE.txt
+│   ├── fmc/                     50 FMC adapters
 │   ├── app.js
 │   ├── engine.js
 │   ├── evidence-locator.js
