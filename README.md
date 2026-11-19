@@ -4,7 +4,7 @@
 **Documentation updated:** November 19, 2026  
 **Application version:** Browser v7 (latest approved v7 code, including Mawer FMC #50)  
 **Registered Fund Management Companies (FMCs):** **50**  
-**Distribution type:** Complete browser application and rebuildable source tree, **without** test datasets, source PDFs, regression runners, reference snapshots, or archived release reports.
+**Distribution type:** Complete browser application and rebuildable source tree
 
 This README is the **single current documentation** for the production package. It consolidates the relevant operating instructions, architecture and release evolution from **v6-5 through the latest v7 + Mawer FMC #50**. The application and its generated bundles are copied unchanged from the supplied updated v7 baseline; the production cleanup changes packaging and documentation only.
 
