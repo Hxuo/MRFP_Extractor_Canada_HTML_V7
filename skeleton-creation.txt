@@ -1,5 +1,5 @@
-if not exist "MRFP_Extractor_Canada_HTML_v7" mkdir "MRFP_Extractor_Canada_HTML_v7"
-cd /d "MRFP_Extractor_Canada_HTML_v7"
+if not exist "%USERPROFILE%\Documents\MRFP_Extractor_Canada_HTML_v7" mkdir "%USERPROFILE%\Documents\MRFP_Extractor_Canada_HTML_v7"
+cd /d "%USERPROFILE%\Documents\MRFP_Extractor_Canada_HTML_v7"
 if not exist "css" mkdir "css"
 if not exist "dev-tools" mkdir "dev-tools"
 if not exist "js" mkdir "js"
