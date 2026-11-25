@@ -1,7 +1,8 @@
 /* FMC adapter: Canada Life Investment Management Ltd.
  * Canada Life MRFPs use per-Series ratio tables arranged in two page columns.
  * The first reporting-period column is identified from its printed month/day
- * AND year header; MER and PTR cells are read from that exact column only.
+ * AND year header, including one-column inception-period tables; MER and PTR
+ * cells are read from that exact column only.
  * Trading Expense Ratio is intentionally not parsed as TER. The shared
  * office rule permits TER only from a separately labelled Total Expense Ratio.
  */
@@ -106,7 +107,7 @@ function canadaLifePageTables(page,fund,date){
   const headers=lines.map(line=>{
    const cls=canadaLifeClassFromHeader(line);
    const years=line.items.filter(item=>/^20\d{2}$/.test(String(item.str||'').trim())).sort((a,b)=>a.x-b.x);
-   return cls&&years.length>=2?{line,cls,years}:null;
+   return cls&&years.length>=1?{line,cls,years}:null;
   }).filter(Boolean).filter(header=>canadaLifeCurrentHeader(lines,header.line,header.years,date));
   headers.sort((a,b)=>b.line.y-a.line.y);
   for(let index=0;index<headers.length;index++){
@@ -206,7 +207,7 @@ function canadaLifeEvidencePageTables(page,fund,date){
   const headers=lines.map(line=>{
    const cls=canadaLifeClassFromHeader(line);
    const years=line.items.filter(item=>/^20\d{2}$/.test(String(item.str||'').trim())).sort((a,b)=>a.x-b.x);
-   return cls&&years.length>=2?{line,cls,years}:null;
+   return cls&&years.length>=1?{line,cls,years}:null;
   }).filter(Boolean).filter(header=>canadaLifeCurrentHeader(lines,header.line,header.years,date));
   headers.sort((a,b)=>b.line.y-a.line.y);
   for(let index=0;index<headers.length;index++){
