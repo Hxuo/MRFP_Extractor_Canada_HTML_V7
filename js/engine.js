@@ -4001,7 +4001,7 @@ function canadaLifePageTables(page,fund,date){
   const headers=lines.map(line=>{
    const cls=canadaLifeClassFromHeader(line);
    const years=line.items.filter(item=>/^20\d{2}$/.test(String(item.str||'').trim())).sort((a,b)=>a.x-b.x);
-   return cls&&years.length>=2?{line,cls,years}:null;
+   return cls&&years.length>=1?{line,cls,years}:null;
   }).filter(Boolean).filter(header=>canadaLifeCurrentHeader(lines,header.line,header.years,date));
   headers.sort((a,b)=>b.line.y-a.line.y);
   for(let index=0;index<headers.length;index++){
